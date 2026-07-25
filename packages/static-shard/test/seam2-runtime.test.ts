@@ -941,10 +941,25 @@ describe("seam #2 — gzip shard payloads (T13, ADR-0002 §8)", () => {
     const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
       basePath: outputDir,
       fetch: diskFetchBinary(requests),
+      // A gzipped build moves the manifest to manifest.json.gz, and it is the bootstrap fetch — so a
+      // hand-written createClient caller has to say so. The generated connect() is stamped with it.
+      manifestGzip: true,
     });
 
     const result = await client.movies.findMany({ where: { year: { equals: 2000 } } });
     expect(result.records.map((r) => r.title).sort()).toEqual(["Gladiator", "Memento", "Snatch"].sort());
     expect(requests.some((u) => u.endsWith(".ndjson.gz"))).toBe(true);
+    // every file this deploy serves is compressed, bootstrap included
+    expect(requests[0]).toMatch(/manifest\.json\.gz$/);
+    expect(requests.every((u) => u.endsWith(".gz"))).toBe(true);
+  });
+
+  test("the generated client for a gzipped build carries the flag, so connect() needs no argument", async () => {
+    const { clientOutDir } = build(
+      { ...config, gzip: true, output: "out-gzc", clientOut: "client-gzc" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+    const clientTs = await readFile(path.join(clientOutDir, "client.ts"), "utf8");
+    expect(clientTs).toMatch(/manifestGzip: MANIFEST_GZIP/);
   });
 });
