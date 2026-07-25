@@ -162,22 +162,18 @@ async function runInit(rest: string[]): Promise<void> {
   const resolvedConfigPath = path.resolve(process.cwd(), configPath);
 
   const interactive = !options.yes && process.stdin.isTTY;
-  // The wizard owns the whole screen, so a progress bar underneath it would fight its rendering —
-  // only the headless path reports. A full scan is the read worth watching.
-  const progress = interactive ? undefined : createProgressReporter(process.stdout);
+  // Both paths report: the wizard can't render *over* a bar, but everything before its first frame
+  // (read → measure → infer, the whole wait under --full-scan) happens while the screen is still
+  // ours, and it hands off by finishing the reporter itself.
+  const progress = createProgressReporter(process.stdout);
 
   let result: InitResult;
   try {
     result = interactive
-      ? await runInteractiveInit({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options })
-      : init({
-          cwd: process.cwd(),
-          configPath: resolvedConfigPath,
-          ...options,
-          ...(progress ? { onProgress: progress.report } : {}),
-        });
+      ? await runInteractiveInit({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options, progress })
+      : init({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options, onProgress: progress.report });
   } finally {
-    progress?.finish();
+    progress.finish(); // idempotent — a no-op if the wizard already cleared it
   }
 
   for (const warning of result.warnings) console.warn(warning);

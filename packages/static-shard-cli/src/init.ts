@@ -219,6 +219,9 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       throw new Error(`static-shard: init found no records in "${inputPath}" to infer a schema from`);
     }
     const sample = sampleRecords(allRecords, opts);
+    // Open-ended: inference walks every sampled record per field with no reportable midpoint, and
+    // under --full-scan the sample IS the whole dataset, which is the slow half of a full scan.
+    opts.onProgress?.({ phase: "inferring schema", done: sample.length, unit: "count" });
     const inferred = inferSchema(sample);
 
     sortField = opts.sortField ?? inferred.sortField;

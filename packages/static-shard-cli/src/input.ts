@@ -370,15 +370,28 @@ export function countInputRecords(inputPathOrGlob: string, opts: InputReadOption
     throw new Error(`static-shard: no input files matched "${inputPathOrGlob}"`);
   }
 
+  const progress = opts.onProgress;
+  const phase = "measuring dataset";
+
   if (opts.format === "ndjson") {
+    // A full stream of the whole input — the one long pass in sampled (non-full-scan) mode, so it
+    // reports bytes just like the read does rather than sitting silent.
+    const totalBytes = progress ? files.reduce((sum, file) => sum + statSync(file).size, 0) : 0;
+    let bytesDone = 0;
     let recordCount = 0;
     let datasetBytes = 0;
     for (const file of files) {
-      forEachNdjsonLine(file, (line) => {
-        recordCount++;
-        datasetBytes += Buffer.byteLength(line, "utf8");
-        return true;
-      });
+      const fileStart = bytesDone;
+      forEachNdjsonLine(
+        file,
+        (line) => {
+          recordCount++;
+          datasetBytes += Buffer.byteLength(line, "utf8");
+          return true;
+        },
+        progress && ((soFar) => progress({ phase, done: fileStart + soFar, total: totalBytes, unit: "bytes" })),
+      );
+      bytesDone += statSync(file).size;
     }
     return { recordCount, datasetBytes };
   }

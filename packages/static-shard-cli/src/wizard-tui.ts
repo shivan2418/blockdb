@@ -2,6 +2,7 @@ import readline from "node:readline";
 import path from "node:path";
 import { DEFAULT_SAMPLE_SIZE, init, resolveInitConfig, sampleRecords, type InitOptions, type InitResult } from "./init.js";
 import { countInputRecords, readInputRecords, type PopulationStats } from "./input.js";
+import type { ProgressReporter } from "./progress.js";
 import {
   applyKey,
   buildWizardData,
@@ -27,6 +28,11 @@ export interface InteractiveInitOptions
   > {
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
+  /**
+   * Reports the load phase (read → measure → infer) that runs before the first frame paints. The
+   * wizard owns the screen once it starts rendering, so this is finished and cleared at hand-off.
+   */
+  progress?: ProgressReporter;
 }
 
 /**
@@ -120,18 +126,26 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
 
   const resolvedInput = path.resolve(opts.cwd, inputPath);
   const readOpts = { format, delimiter, recordsPath: opts.records, fields: {} };
+  // All the loading below happens BEFORE the wizard paints its first frame, so it's the one stretch
+  // where a `--full-scan` user stares at a blank terminal. Report it, then hand the screen over.
+  const progress = opts.progress;
   const allRecords = readInputRecords(resolvedInput, {
     ...readOpts,
     // Sampled inference only needs the leading records; a full scan reads everything.
     limit: opts.fullScan ? undefined : (opts.sampleSize ?? DEFAULT_SAMPLE_SIZE),
+    ...(progress ? { onProgress: progress.report } : {}),
   });
   const sample = sampleRecords(allRecords, opts);
   // With a full scan the sample IS the whole dataset; otherwise count the true totals cheaply
   // (NDJSON streamed, no parse) so the review screen and size estimates reflect the full input.
+  progress?.report({ phase: "measuring dataset", done: allRecords.length, unit: "count" });
   const population: PopulationStats = opts.fullScan
     ? { recordCount: allRecords.length, datasetBytes: allRecords.reduce((s, r) => s + Buffer.byteLength(JSON.stringify(r), "utf8"), 0) }
-    : countInputRecords(resolvedInput, readOpts);
+    : countInputRecords(resolvedInput, { ...readOpts, ...(progress ? { onProgress: progress.report } : {}) });
+  progress?.report({ phase: "inferring schema", done: sample.length, unit: "count" });
   const data: WizardData = buildWizardData(sample, population);
+  // Loading done — clear the bar before the TUI takes over the screen.
+  progress?.finish();
 
   let state: WizardState = createInitialState(data);
 
