@@ -212,6 +212,14 @@ const LOCALITY_PROBE_FIELDS = 8;
  * read most of its own data on every query.
  */
 const SCATTERED_SORT_FIELD_RATIO = 0.5;
+
+/** What sorting by one candidate costs the user's chosen filters: the average, and the single best of them. */
+export interface SortFieldLocality {
+  /** Mean fraction of data files a query on the chosen filter fields would read. The ranking key. */
+  mean: number;
+  /** The cheapest single filter under this candidate — shown so the trade is visible, never ranked on. */
+  best: { scatter: number; field: string };
+}
 /** Cap on bins used to model shards; beyond this the extra resolution changes no ranking decision. */
 const LOCALITY_MAX_BINS = 64;
 
@@ -278,7 +286,7 @@ export function sortFieldLocality(
   data: WizardData,
   state: WizardState,
   shardCount: number,
-): Record<string, { scatter: number; field: string }> {
+): Record<string, SortFieldLocality> {
   const bins = Math.max(2, Math.min(LOCALITY_MAX_BINS, shardCount, data.records.length));
   const byName = new Map(data.fields.map((f) => [f.name, f]));
   const probes = [...state.indexedFields]
@@ -288,21 +296,26 @@ export function sortFieldLocality(
     .filter((f): f is WizardField => f !== undefined);
   if (probes.length === 0) return {};
 
-  const out: Record<string, { scatter: number; field: string }> = {};
+  const out: Record<string, SortFieldLocality> = {};
   for (const candidate of data.sortCandidates) {
     const kind = byName.get(candidate)!.kind as SortKind;
-    // The BEST filter field, not the average across all of them. Only one dimension can be clustered,
-    // so averaging buries the improvement under the fields that scatter regardless — on real data it
-    // scored a well-chosen sort field identically to a useless one. The decision this informs is
-    // "which of my filters do I want to be cheap", so the ranking is over exactly that.
-    let best: { scatter: number; field: string } | undefined;
+    const measured: { scatter: number; field: string }[] = [];
     for (const probe of probes) {
       const scatter = scatterOf(data.records, candidate, kind, probe.name, probe.multi, bins);
-      if (scatter !== undefined && (best === undefined || scatter < best.scatter)) {
-        best = { scatter, field: probe.name };
-      }
+      if (scatter !== undefined) measured.push({ scatter, field: probe.name });
     }
-    if (best !== undefined) out[candidate] = best;
+    if (measured.length === 0) continue;
+
+    // Rank on the MEAN across the user's filters, not the best of them. Sorting by S always clusters
+    // S perfectly, so ranking on the best filter saturates: every candidate that is itself a selected
+    // filter ties at the floor and the tiebreak decides instead. On real Scryfall data that handed the
+    // recommendation to `artist` (915 distinct) over `set` (637) purely on cardinality, even though
+    // sorting by `set` leaves artist queries at 39% while sorting by `artist` pushes set queries to
+    // 47%. The mean is a uniform-query-frequency assumption — stated, not hidden — and it is the only
+    // aggregation here that reflects total cost rather than one field's best case.
+    const mean = measured.reduce((sum, m) => sum + m.scatter, 0) / measured.length;
+    const best = measured.reduce((lo, m) => (m.scatter < lo.scatter ? m : lo));
+    out[candidate] = { mean, best };
   }
   return out;
 }
@@ -326,7 +339,7 @@ export function recommendedSortFieldFor(data: WizardData, state: WizardState, sh
 
   return scored.sort((a, b) => {
     if (skews(a) !== skews(b)) return skews(a) ? 1 : -1;
-    if (locality[a]!.scatter !== locality[b]!.scatter) return locality[a]!.scatter - locality[b]!.scatter;
+    if (locality[a]!.mean !== locality[b]!.mean) return locality[a]!.mean - locality[b]!.mean;
     const cardDiff = byName.get(b)!.cardinality - byName.get(a)!.cardinality;
     return cardDiff !== 0 ? cardDiff : a < b ? -1 : 1;
   })[0]!;
@@ -511,11 +524,8 @@ function forcedIndexedFieldConfigs(data: WizardData, sortField: string): Record<
 export interface WizardEstimate {
   costs: CostEstimate;
   warnings: string[];
-  /**
-   * Per sort-field candidate: the measured fraction of data files the user's best-clustered filter
-   * would read under that choice, and which filter field that is.
-   */
-  locality: Record<string, { scatter: number; field: string }>;
+  /** Per sort-field candidate, the measured cost of the user's filters under that choice. */
+  locality: Record<string, SortFieldLocality>;
   masterProfile: DatasetProfile;
   /** What enabling `endsWith`/`contains` on a field WOULD cost, independent of whether it's toggled on yet — the text-search step's live preview (ADR-0006 §2/§3). */
   probeIndex(name: string, opts: { endsWith?: boolean; contains?: boolean }): IndexSizeEstimate;
@@ -569,15 +579,16 @@ export function estimateForState(data: WizardData, state: WizardState): WizardEs
   // Measured on the sampled records, so it says what THIS data does rather than guessing from names.
   const locality = sortFieldLocality(data, state, costs.shardCount);
   const sortLocality = locality[state.sortField];
-  if (sortLocality !== undefined && sortLocality.scatter > SCATTERED_SORT_FIELD_RATIO) {
+  if (sortLocality !== undefined && sortLocality.mean > SCATTERED_SORT_FIELD_RATIO) {
     const best = recommendedSortFieldFor(data, state, costs.shardCount);
     const alternative = locality[best];
     warnings.push(
-      `static-shard: sorting by "${state.sortField}" scatters the fields you filter on — even your best-clustered ` +
-        `filter ("${sortLocality.field}") would read about ${Math.round(sortLocality.scatter * 100)}% of your data files. ` +
+      `static-shard: sorting by "${state.sortField}" scatters the fields you filter on — a typical query would read ` +
+        `about ${Math.round(sortLocality.mean * 100)}% of your data files ` +
+        `(best case, filtering on "${sortLocality.best.field}": ${Math.round(sortLocality.best.scatter * 100)}%). ` +
         (best !== state.sortField && alternative !== undefined
-          ? `Sorting by "${best}" would bring filters on "${alternative.field}" down to about ${Math.round(alternative.scatter * 100)}%.`
-          : `Filtering on the field you sort by is what makes that cheap.`),
+          ? `Sorting by "${best}" would average about ${Math.round(alternative.mean * 100)}% instead.`
+          : `Some fields cannot be helped by any sort field — only one dimension can be clustered.`),
     );
   }
   for (const [name, idx] of Object.entries(costs.indexes)) {
@@ -765,7 +776,7 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
     dim("  Filters on this field read a few files; filters on anything else may read most of them."),
     dim("  Pick what you filter or sort by most. Text fields also get starts-with here for free."),
     ...(Object.keys(estimate.locality).length > 0
-      ? [dim("  Measured on your data: how much of it your best-clustered filter would read under each choice.")]
+      ? [dim("  Measured on your data: average share of it your filters would read, assuming you use them equally.")]
       : []),
     "",
   ];
@@ -788,8 +799,13 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
     const measured = estimate.locality[f.name];
     const cost =
       measured === undefined
-        ? dim(pad(f.kind + " · " + fmtInt(f.cardinality) + " distinct", 40))
-        : dim(pad(`${f.kind} · ${measured.field} filters read ~${Math.round(measured.scatter * 100)}%`, 40));
+        ? dim(pad(f.kind + " · " + fmtInt(f.cardinality) + " distinct", 44))
+        : dim(
+            pad(
+              `${f.kind} · ~${Math.round(measured.mean * 100)}% avg · best ${measured.best.field} ${Math.round(measured.best.scatter * 100)}%`,
+              44,
+            ),
+          );
     const plain = `  ${marker} ${pad(f.name, 22)} ${cost}${rec}`;
     return renderRow(plain, { cursor: idx === state.cursor });
   });

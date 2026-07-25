@@ -517,7 +517,7 @@ describe("stage order — what you filter on is asked BEFORE the sort field", ()
 
     // and the measurement backs it: sorting by the timestamp reads far more of the data
     const est = estimateForState(data, state);
-    expect(est.locality.rank!.scatter).toBeLessThan(est.locality.scanned_at!.scatter);
+    expect(est.locality.rank!.mean).toBeLessThan(est.locality.scanned_at!.mean);
   });
 
   test("prefers a field the user filters on over one they don't, because it clusters itself perfectly", () => {
@@ -527,7 +527,43 @@ describe("stage order — what you filter on is asked BEFORE the sort field", ()
     state = { ...state, indexedFields: new Set(["region"]) };
     state = applyKey(data, state, { type: "right" });
     const est = estimateForState(data, state);
-    expect(est.locality.region!.scatter).toBeLessThanOrEqual(est.locality.rank!.scatter);
+    expect(est.locality.region!.mean).toBeLessThanOrEqual(est.locality.rank!.mean);
+  });
+
+  test("ranks on total cost, not on one filter's best case", () => {
+    // The regression that shipped once: sorting by S always clusters S perfectly, so ranking on the
+    // BEST filter ties every self-clustering candidate at the floor and lets the cardinality tiebreak
+    // decide instead. On real Scryfall data that picked `artist` (915 distinct) over `set` (637), even
+    // though sorting by `set` left artist queries at 39% while sorting by `artist` pushed set queries
+    // to 47%.
+    //
+    // The asymmetry reproduced here: `city` blocks sit inside `region` blocks, but city LABELS sort in
+    // a scrambled order. So ordering by region keeps both contiguous, while ordering by city keeps only
+    // city contiguous and interleaves regions. Both still bottom out at the same best case.
+    const scramble = (n: number) => {
+      let x = Math.imul(n + 1, 2654435761) >>> 0;
+      x ^= x >>> 15;
+      return `c${(x % 100000).toString().padStart(5, "0")}`;
+    };
+    const rows = Array.from({ length: 240 }, (_, i) => ({
+      // uncorrelated with everything, like a real identifier — otherwise row order IS the best
+      // possible sort field and it wins on merit rather than by the bug under test
+      id: scramble(i * 7919),
+      region: `region-${String(Math.floor(i / 12)).padStart(2, "0")}`,
+      city: scramble(Math.floor(i / 4)),
+    }));
+    const data = buildWizardData(rows);
+    let state = atStage(data, FILTER_STAGE);
+    // a small byte target so the sample is cut into enough bins for the measurement to have resolution
+    state = { ...state, indexedFields: new Set(["region", "city"]), shardBytes: 4096 };
+    state = applyKey(data, state, { type: "right" });
+
+    const loc = estimateForState(data, state).locality;
+    // both cluster themselves perfectly, so a best-case ranking cannot tell them apart — the trap
+    expect(loc.region!.best.scatter).toBeCloseTo(loc.city!.best.scatter, 5);
+    // ...but total cost separates them, and that is the key the recommendation follows
+    expect(loc.region!.mean).toBeLessThan(loc.city!.mean);
+    expect(state.sortField).toBe("region");
   });
 
   test("a fully-unique field carries no locality signal and cannot skew the ranking", () => {
