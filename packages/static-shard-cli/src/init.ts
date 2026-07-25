@@ -10,12 +10,26 @@ import { getFormatVersion } from "./version.js";
 /** Exported so callers that sample records the same way `init` does (the wizard, T12) never drift from this default. */
 export const DEFAULT_SAMPLE_SIZE = 1000;
 
-/** Shared by `init` and the wizard's live estimates (T12): a full scan uses every record, otherwise the leading `sampleSize` (default `DEFAULT_SAMPLE_SIZE`). */
+/**
+ * How many leading records inference should look at, or `undefined` for every record.
+ *
+ * Reading everything is the DEFAULT: inference decides the baked schema, and a schema wrong about
+ * the data is the expensive kind of wrong — a value union missing a late value, a field that never
+ * appeared in the first 1000 rows, a cardinality that misprices an index or picks the wrong sort
+ * field. `build` already reads the whole input, so a full scan asks for no memory a build doesn't.
+ * Sampling stays available for a fast look at a large file, but it is now opt-in.
+ */
+export function sampleLimit(opts: { fullScan?: boolean; sampleSize?: number }): number | undefined {
+  return opts.fullScan ? undefined : opts.sampleSize;
+}
+
+/** Shared by `init` and the wizard's live estimates (T12): applies `sampleLimit` to already-read records. */
 export function sampleRecords(
   records: Record<string, unknown>[],
   opts: { fullScan?: boolean; sampleSize?: number },
 ): Record<string, unknown>[] {
-  return opts.fullScan ? records : records.slice(0, opts.sampleSize ?? DEFAULT_SAMPLE_SIZE);
+  const limit = sampleLimit(opts);
+  return limit === undefined ? records : records.slice(0, limit);
 }
 
 /** Convention for editor JSON-schema resolution: `config.schema.json` ships inside the installed devDependency. */
@@ -32,8 +46,9 @@ export interface InitOptions {
   yes: boolean;
   /** Re-run inference even if a config already exists, refreshing the baked schema block. */
   reinfer?: boolean;
-  /** Infer from every record instead of a sample (rare fields / true cardinalities). */
+  /** Force a full scan. Redundant with the default, kept so `--full-scan` stays meaningful and explicit. */
   fullScan?: boolean;
+  /** Opt into inferring from only the leading `sampleSize` records instead of the whole input. */
   sampleSize?: number;
   collection?: string;
   /** Positional input path/glob — required the first time `init` runs for a given config. */
@@ -55,8 +70,8 @@ export interface InitOptions {
   shardBytes?: number;
   indexChunkBytes?: number;
   /**
-   * Progress for the read phase. Worth wiring for `--full-scan`, which reads the entire input
-   * rather than a bounded leading sample and is otherwise a long silence.
+   * Progress for the read phase. Reading the whole input is the default, so on a large file this is
+   * the difference between a progress bar and a long silence.
    */
   onProgress?: OnProgress;
 }
@@ -215,8 +230,8 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       delimiter: readDelimiter,
       recordsPath,
       fields: {},
-      // Sampled inference only needs the leading records; a full scan reads everything.
-      limit: opts.fullScan ? undefined : (opts.sampleSize ?? DEFAULT_SAMPLE_SIZE),
+      // Reads everything unless the caller opted into a sample (see `sampleLimit`).
+      limit: sampleLimit(opts),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     });
     if (allRecords.length === 0) {

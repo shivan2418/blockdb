@@ -2,7 +2,7 @@
 import path from "node:path";
 import { build } from "./build.js";
 import { loadConfigFile } from "./config.js";
-import { init } from "./init.js";
+import { DEFAULT_SAMPLE_SIZE, init } from "./init.js";
 import { inspect } from "./inspect.js";
 import { runInteractiveInit } from "./wizard-tui.js";
 import { COMMAND_HELP, TOP_LEVEL_HELP, isHelpFlag, isVersionFlag } from "./help.js";
@@ -96,6 +96,11 @@ function parseInitArgs(rest: string[]): { configPath: string; options: Omit<Init
         break;
       case "--full-scan":
         fullScan = true;
+        break;
+      // Inference reads every record by default, so sampling is what needs a flag now. `--sample`
+      // takes the default size; `--sample-size N` names one.
+      case "--sample":
+        sampleSize = DEFAULT_SAMPLE_SIZE;
         break;
       case "--sample-size":
         sampleSize = Number(rest[++i]);

@@ -47,8 +47,9 @@ Schema
   --contains <a,b>          Also support contains on these (builds a trigram index)
 
 Inference
-  --full-scan               Infer from every record instead of a leading sample
-  --sample-size <n>         Records to sample when not a full scan (default: 1000)
+  --full-scan               Infer from every record (the default; explicit form)
+  --sample                  Infer from a leading sample instead of the whole input
+  --sample-size <n>         Infer from the leading <n> records instead of the whole input
   --reinfer                 Re-infer even though a config already exists
 
 Output

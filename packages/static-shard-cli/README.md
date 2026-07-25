@@ -10,7 +10,7 @@ npx static-shard-cli init      # interactive wizard, or fully flag-driven with -
 npx static-shard build         # → public/shard-data/  (deploy this)  +  src/shard-db/  (commit this)
 ```
 
-`init` is the only place inference happens (sampled by default, `--full-scan` for exact cardinalities); it writes a single committed `static-shard.config.json`. `build` is headless (no TTY, safe in CI): it replays the config's baked schema — never re-infers — and fails loudly if your data has drifted from it.
+`init` is the only place inference happens, and it reads **every record by default** — it writes a single committed `static-shard.config.json`. `build` is headless (no TTY, safe in CI): it replays the config's baked schema — never re-infers — and fails loudly if your data has drifted from it.
 
 ### Commands
 
@@ -20,13 +20,21 @@ npx static-shard build         # → public/shard-data/  (deploy this)  +  src/s
 
 Every wizard choice is also a CLI flag (nothing wizard-only), so `init --yes` with the right flags reproduces exactly what the wizard would have written — config generation is fully scriptable for CI.
 
+### Inference reads everything by default
+
+`init` decides the baked schema, and a schema that is wrong about your data is the expensive kind of wrong: a value union missing a value that first appears at row 40,000, a field absent from the first 1000 rows, a cardinality that misprices an index or picks the wrong sort field. So `init` reads the whole input. `build` already does, so this asks for no memory a build doesn't.
+
+Pass `--sample` (or `--sample-size <n>`) for a fast look at a large file. It is a real speed/accuracy trade and it is opt-in, not the default.
+
 ### Choosing the sort field
 
 The single biggest lever on query cost. Records are range-partitioned by this one field, so it decides **which records get stored next to each other**: a filter on the sort field reads a handful of data files, while a filter on anything else may read most of them. Pick the field your most common filter or ordering actually uses.
 
 `number`, `date` and `string` fields are all eligible. A sorted **string** field additionally gets `startsWith` for free — a prefix is a contiguous range of the split-points already in the manifest, so it needs no index chunk fetch at all. On a 25k-card dataset (29 files), `startsWith("Light")` reads 26 of 29 files when sorted by a timestamp, and 1 of 29 when sorted by `name`.
 
-`init` defaults to the highest-cardinality `number`/`date` field, which spreads shards evenly but is blind to what you query. A bulk-maintenance timestamp (`updated_at`, `synced_at`) is close to worst-case: it correlates with nothing users search, so every result set scatters across every file. If that's what got recommended, override it.
+The wizard measures this rather than guessing. It asks what you filter on **first**, then — for each candidate sort field — orders your actual records by it, cuts them into shard-sized bins, and counts how many bins each of your filter values lands in. Each candidate shows what share of your data files a query would read, and it warns when even your best-clustered filter would still read over half of it. Nothing keys off field names.
+
+`init --yes`, with no filter selection to measure against, falls back to the highest-cardinality `number`/`date` field. That spreads shards evenly but is blind to what you query, so a bulk-maintenance timestamp can win — check it, or use the wizard.
 
 ### Text-search opt-ins have real cost
 

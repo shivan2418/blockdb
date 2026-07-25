@@ -1059,6 +1059,41 @@ describe("seam #1 — asking to index a payload-only json field degrades gracefu
     writeFileSync(path.join(dir, "nested.ndjson"), NESTED.map((p) => JSON.stringify(p)).join("\n") + "\n");
   }
 
+  test("init reads every record by default, so inference sees data past the first 1000", () => {
+    // A field and a value that only appear late in the file. Sampling the leading records misses
+    // both: the field looks absent-free and the enum looks closed at two values.
+    const rows = Array.from({ length: 2500 }, (_, i) => ({
+      id: `r${i}`,
+      rank: i,
+      tier: i < 1200 ? (i % 2 === 0 ? "bronze" : "silver") : "gold",
+      ...(i > 2000 ? { note: "late arrival" } : {}),
+    }));
+    writeFileSync(path.join(tmpDir, "late.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const configPath = path.join(tmpDir, "static-shard.config.json");
+
+    const { config } = init({ cwd: tmpDir, configPath, yes: true, inputPath: "late.ndjson" });
+
+    // the late-only field was discovered at all
+    expect(config.schema.fields.note).toBeDefined();
+    // and "gold" is in tier's value union, which a leading sample would never have seen
+    expect(config.schema.fields.tier?.values).toEqual(["bronze", "gold", "silver"]);
+  });
+
+  test("--sample-size opts back into a leading sample, and misses what lies beyond it", () => {
+    const rows = Array.from({ length: 2500 }, (_, i) => ({
+      id: `r${i}`,
+      rank: i,
+      tier: i < 1200 ? (i % 2 === 0 ? "bronze" : "silver") : "gold",
+    }));
+    writeFileSync(path.join(tmpDir, "late.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const configPath = path.join(tmpDir, "static-shard.config.json");
+
+    const { config } = init({ cwd: tmpDir, configPath, yes: true, inputPath: "late.ndjson", sampleSize: 500 });
+
+    // sampling is a documented speed/accuracy trade, not a silent one — "gold" is simply not there
+    expect(config.schema.fields.tier?.values).toEqual(["bronze", "silver"]);
+  });
+
   test("--reinfer keeps a hand-authored tsType on a json field", () => {
     writeNested(tmpDir);
     const configPath = path.join(tmpDir, "static-shard.config.json");
