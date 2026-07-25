@@ -162,6 +162,31 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
     expect(chunks.map((c) => hashOf(c.file))).toEqual(plain.manifest.indexes.title!.chunks.map((c) => hashOf(c.file)));
   });
 
+  test("gzip: true ships manifest.json.gz and stamps the generated client to fetch it", () => {
+    const { manifest, outputDir, clientOutDir } = build(
+      { ...indexedConfig, gzip: true, output: "out-mgz", clientOut: "client-mgz" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+
+    // The name changes, not just the encoding — a stale plain manifest.json can never be served as
+    // if it were current.
+    expect(existsSync(path.join(outputDir, "manifest.json"))).toBe(false);
+    const onDisk = readFileSync(path.join(outputDir, "manifest.json.gz"));
+    expect(JSON.parse(gunzipSync(onDisk).toString("utf8"))).toEqual(manifest);
+
+    // The manifest is the bootstrap fetch, so the encoding has to be baked into the client.
+    const clientTs = readFileSync(path.join(clientOutDir, "client.ts"), "utf8");
+    expect(clientTs).toMatch(/manifestGzip:/);
+
+    // ...and not baked when it doesn't apply
+    const plain = build(
+      { ...indexedConfig, output: "out-mplain", clientOut: "client-mplain" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+    expect(existsSync(path.join(plain.outputDir, "manifest.json"))).toBe(true);
+    expect(readFileSync(path.join(plain.clientOutDir, "client.ts"), "utf8")).not.toMatch(/manifestGzip/);
+  });
+
   test("a string sort field range-partitions lexicographically and prunes like any other sort field", () => {
     // ADR-0002 §2 makes the number/date preference a *heuristic for the default*, "never a hidden
     // decision" — and locality on the field users actually search is the whole point of the choice.

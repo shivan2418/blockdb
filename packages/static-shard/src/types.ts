@@ -232,6 +232,12 @@ export interface ClientOptions {
    * than it throws rather than silently truncating.
    */
   maxResults?: number;
+  /**
+   * Set by codegen when the build pre-compressed the manifest (`gzip: true`). Only the manifest needs
+   * telling: everything else it points at carries `.gz` in its own path. Hand-written callers of
+   * `createClient` must match their deploy; the generated `connect()` already does.
+   */
+  manifestGzip?: boolean;
 }
 
 export type GenericClient<S extends SchemaMeta, Records> = {

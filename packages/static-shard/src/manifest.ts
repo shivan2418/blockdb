@@ -1,5 +1,5 @@
 import { ShardError } from "./errors.js";
-import { fetchJson } from "./fetch-file.js";
+import { fetchGzippedText, fetchJson, parseCorruptible } from "./fetch-file.js";
 import { FORMAT_VERSION } from "./version.js";
 
 export interface ShardDescriptor {
@@ -92,9 +92,22 @@ export interface Manifest {
   indexes: Record<string, IndexDescriptor>;
 }
 
-export async function fetchManifest(basePath: string, fetchImpl: typeof fetch): Promise<Manifest> {
-  const url = `${basePath}/manifest.json`;
-  const parsed = (await fetchJson(url, "manifest", fetchImpl)) as Manifest;
+/**
+ * Fetches the root manifest. `gzipped` says the deploy pre-compressed it (ADR-0002 §8) — unlike index
+ * chunks and zonemap sidecars, whose `.gz` paths come FROM the manifest and so describe themselves,
+ * this is the bootstrap fetch: nothing has been read yet that could tell the client the encoding. The
+ * generated client carries the answer instead, stamped by the same `build` that wrote the file, so the
+ * two cannot drift.
+ */
+export async function fetchManifest(basePath: string, fetchImpl: typeof fetch, gzipped = false): Promise<Manifest> {
+  const url = `${basePath}/manifest.json${gzipped ? ".gz" : ""}`;
+  let parsed: Manifest;
+  if (gzipped) {
+    const text = await fetchGzippedText(url, "manifest", fetchImpl);
+    parsed = parseCorruptible(url, () => JSON.parse(text) as Manifest);
+  } else {
+    parsed = (await fetchJson(url, "manifest", fetchImpl)) as Manifest;
+  }
   // JSON-valid but not a manifest — the body "won't parse" into one (ADR-0007 §5).
   if (typeof parsed.formatVersion !== "number") {
     throw new ShardError({

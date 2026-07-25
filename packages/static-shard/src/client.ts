@@ -448,7 +448,7 @@ export function createClient<S extends SchemaMeta, Records>(
   const fetchImpl = opts.fetch ?? fetch;
   const maxResults = opts.maxResults ?? DEFAULT_MAX_RESULTS;
   let manifestPromise: Promise<Manifest> | undefined;
-  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl));
+  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl, opts.manifestGzip === true));
 
   const makeCollection = (meta: CollectionMeta) => {
     const collection: Record<string, unknown> = {

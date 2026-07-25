@@ -292,14 +292,26 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
   // Minified, not pretty-printed: every client downloads this file before it can run a query, and
   // the ADR-0003 §3 budget is measured on gzip(minified) — so indentation would be bytes the budget
   // never accounted for (~2.2x the file on a real dataset). `curl | jq` reads minified JSON fine.
-  writeFileSync(path.join(resolved.output, "manifest.json"), JSON.stringify(manifest));
+  //
+  // Under `gzip` it also ships pre-compressed. The name changes rather than the encoding alone, so a
+  // stale plain `manifest.json` left in an output directory can never be silently served as if it
+  // were current — and the generated client below is stamped with which one to fetch.
+  const manifestJson = JSON.stringify(manifest);
+  writeFileSync(
+    path.join(resolved.output, resolved.gzip ? "manifest.json.gz" : "manifest.json"),
+    resolved.gzip ? gzipSync(manifestJson) : manifestJson,
+  );
 
   progress?.({ phase: "generating client", done: 1, total: 1, unit: "count" });
   mkdirSync(resolved.clientOut, { recursive: true });
   writeFileSync(path.join(resolved.clientOut, "schema.ts"), generateSchemaTs(manifest, generatorVersion));
   writeFileSync(
     path.join(resolved.clientOut, "client.ts"),
-    generateClientTs(manifest, { basePath: resolved.basePath, generatorVersion }),
+    generateClientTs(manifest, {
+      basePath: resolved.basePath,
+      generatorVersion,
+      ...(resolved.gzip ? { manifestGzip: true } : {}),
+    }),
   );
 
   return { manifest, outputDir: resolved.output, clientOutDir: resolved.clientOut, warnings };

@@ -117,7 +117,10 @@ export type Schema = typeof schema;
 `;
 }
 
-export function generateClientTs(manifest: Manifest, opts: { basePath: string; generatorVersion: string }): string {
+export function generateClientTs(
+  manifest: Manifest,
+  opts: { basePath: string; generatorVersion: string; manifestGzip?: boolean },
+): string {
   const { collection } = manifest.schema;
   const collectionKey = propKey(collection);
   const collectionIndex = JSON.stringify(collection);
@@ -131,11 +134,19 @@ export interface Db {
 }
 
 const DEFAULT_BASE_PATH = ${JSON.stringify(opts.basePath)};
-
+${
+  opts.manifestGzip
+    ? `// This build pre-compressed the manifest (\`gzip: true\`). Everything else the manifest points at
+// carries \`.gz\` in its own path, but the manifest is fetched before any of that can be read — so the
+// encoding is stamped here, by the same build that wrote the file.
+const MANIFEST_GZIP = true;
+`
+    : ""
+}
 export function connect(opts?: Partial<ClientOptions>): Db {
   const generic: GenericClient<Schema, Records> = createClient<Schema, Records>(schema, {
     basePath: DEFAULT_BASE_PATH,
-    ...opts,
+${opts.manifestGzip ? "    manifestGzip: MANIFEST_GZIP,\n" : ""}    ...opts,
   });
   return generic as unknown as Db;
 }

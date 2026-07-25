@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { ShardError } from "../src/errors.js";
@@ -124,5 +125,63 @@ describe("FORMAT_VERSION constant", () => {
     const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
     const { version } = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
     expect(FORMAT_VERSION).toBe(parseInt(version.split(".")[0]!, 10));
+  });
+});
+
+describe("fetchManifest — build-time gzipped manifest (ADR-0002 §8)", () => {
+  function fakeGzipFetch(url: string, bytes: Uint8Array): { impl: typeof fetch; urls: string[] } {
+    const urls: string[] = [];
+    const impl = (async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      if (String(input) !== url) return { ok: false, status: 404, json: async () => ({}), text: async () => "" } as Response;
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        }),
+      } as unknown as Response;
+    }) as typeof fetch;
+    return { impl, urls };
+  }
+
+  test("gzipped: true fetches manifest.json.gz and decompresses it", async () => {
+    // The manifest is the bootstrap fetch, so unlike index chunks nothing can tell the client how it
+    // was encoded — the generated client carries the answer instead.
+    const { impl, urls } = fakeGzipFetch("/data/manifest.json.gz", gzipSync(JSON.stringify(manifest)));
+    expect(await fetchManifest("/data", impl, true)).toEqual(manifest);
+    expect(urls).toEqual(["/data/manifest.json.gz"]);
+  });
+
+  test("omitting the flag keeps the plain path — the default deploy is uncompressed", async () => {
+    const fetchImpl = fakeFetch({ "/data/manifest.json": { status: 200, body: JSON.stringify(manifest) } });
+    expect(await fetchManifest("/data", fetchImpl)).toEqual(manifest);
+  });
+
+  test("a gzipped manifest that isn't valid gzip → CORRUPT_DATA, not a silent empty dataset", async () => {
+    const { impl } = fakeGzipFetch("/data/manifest.json.gz", new TextEncoder().encode("not gzip"));
+    const error = await fetchManifest("/data", impl, true).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ShardError);
+    expect((error as ShardError).code).toBe("CORRUPT_DATA");
+  });
+
+  test("a missing gzipped manifest still reports CONFIG against the .gz url (ADR-0007 §6)", async () => {
+    const { impl } = fakeGzipFetch("/data/elsewhere.json.gz", gzipSync("{}"));
+    const error = await fetchManifest("/data", impl, true).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    );
+    expect((error as ShardError).code).toBe("CONFIG");
+    expect((error as ShardError).url).toBe("/data/manifest.json.gz");
   });
 });
