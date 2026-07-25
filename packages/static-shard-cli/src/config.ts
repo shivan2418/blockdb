@@ -9,6 +9,7 @@ const DEFAULT_SHARD_BYTES = 2_097_152; // 2 MiB
 export const DEFAULT_INDEX_CHUNK_BYTES = 45_000;
 const INPUT_FORMATS = ["ndjson", "json", "csv", "tsv"] as const;
 const COMPRESSIONS = ["none", "gzip", "brotli"] as const;
+const TS_IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 /**
  * Field kinds a sort field may have (ADR-0002 §2). Exported so `infer`'s candidate predicate and
  * the wizard's candidate list share this exact set rather than keeping second copies that could
@@ -90,6 +91,28 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
     }
   }
 
+  // Fields sharing a valuesType must agree on the values, or the shared type would be a lie for one of
+  // them. Checked across the whole schema rather than per field, and re-checked on every build, so a
+  // data refresh that makes two fields diverge fails loudly instead of silently widening one.
+  const sharedValues = new Map<string, { field: string; values: readonly string[] }>();
+  for (const [name, field] of Object.entries(config.schema.fields)) {
+    if (field.valuesType === undefined || field.values === undefined) continue;
+    const seen = sharedValues.get(field.valuesType);
+    if (seen === undefined) {
+      sharedValues.set(field.valuesType, { field: name, values: field.values });
+      continue;
+    }
+    const a = [...seen.values].sort().join(",");
+    const b = [...field.values].sort().join(",");
+    if (a !== b) {
+      throw new Error(
+        `static-shard: fields "${seen.field}" and "${name}" both declare valuesType "${field.valuesType}" but their ` +
+          `values differ ([${seen.values.join(", ")}] vs [${field.values.join(", ")}]) — a shared type cannot be ` +
+          `correct for both. Give them separate valuesType names, or reconcile the values.`,
+      );
+    }
+  }
+
   for (const [name, field] of Object.entries(config.schema.fields)) {
     const isSortField = name === sortField;
 
@@ -121,6 +144,19 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
       if (duplicates.length > 0) {
         throw new Error(
           `static-shard: field "${name}" declares duplicate "values" entries (${[...new Set(duplicates)].join(", ")}) — each value must appear once`,
+        );
+      }
+    }
+
+    if (field.valuesType !== undefined) {
+      if (field.values === undefined) {
+        throw new Error(
+          `static-shard: field "${name}" declares "valuesType" but has no "values" — there is no union to name`,
+        );
+      }
+      if (!TS_IDENTIFIER_RE.test(field.valuesType)) {
+        throw new Error(
+          `static-shard: field "${name}" declares valuesType "${field.valuesType}", which is not a valid TypeScript type name`,
         );
       }
     }

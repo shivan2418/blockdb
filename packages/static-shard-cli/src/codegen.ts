@@ -83,17 +83,32 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
   const pkLine = manifest.schema.pk !== undefined ? `    pk: ${JSON.stringify(manifest.schema.pk)},\n` : "";
 
   /**
-   * A named union per enum-like field, exported so app code can use it directly (a filter
-   * component's prop, a dropdown's options) instead of hand-rolling the same literal union. The
-   * record interface deliberately keeps these fields as plain `string` — see `tsTypeForKind`.
+   * A named union per enum-like field, exported so app code can use it directly (a filter component's
+   * prop, a dropdown's options) instead of hand-rolling the same literal union. The record interface
+   * deliberately keeps these fields as plain `string` — see `tsTypeForKind`.
+   *
+   * Fields that declare a `valuesType` share ONE emitted type under that name instead of each getting
+   * a near-duplicate alias, and the per-field alias is not emitted for them: the name they asked for is
+   * the name they get. Narrowing is unaffected either way — `where` reads the `values` tuple in the
+   * schema const below, not these aliases.
    */
-  const valueUnions = fieldEntries
-    .filter(([, field]) => field.indexed && field.values !== undefined)
-    .map(([name, field]) => {
-      const union = field.values!.map((v) => JSON.stringify(v)).join(" | ");
-      return `export type ${typeName}${typeNameFor(name)} = ${union};`;
-    })
-    .join("\n");
+  const valued = fieldEntries.filter(([, field]) => field.indexed && field.values !== undefined);
+  const unionOf = (values: readonly string[]): string => values.map((v) => JSON.stringify(v)).join(" | ");
+
+  const sharedNames: string[] = [];
+  const sharedUnions = new Map<string, string>();
+  for (const [, field] of valued) {
+    if (field.valuesType === undefined || sharedUnions.has(field.valuesType)) continue;
+    sharedUnions.set(field.valuesType, unionOf(field.values!));
+    sharedNames.push(field.valuesType);
+  }
+
+  const valueUnions = [
+    ...sharedNames.map((name) => `export type ${name} = ${sharedUnions.get(name)!};`),
+    ...valued
+      .filter(([, field]) => field.valuesType === undefined)
+      .map(([name, field]) => `export type ${typeName}${typeNameFor(name)} = ${unionOf(field.values!)};`),
+  ].join("\n");
   const valueUnionBlock = valueUnions ? `${valueUnions}\n\n` : "";
 
   return `${generatedHeader(generatorVersion)}

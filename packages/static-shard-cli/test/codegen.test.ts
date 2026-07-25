@@ -308,3 +308,51 @@ describe("generateSchemaTs — enum-like value unions", () => {
     expect(out).toContain('"border-color": { kind: "string"');
   });
 });
+
+describe("generateSchemaTs — valuesType shares one union across fields", () => {
+  const field = (values: string[], valuesType?: string) => ({
+    kind: "string" as const, isDate: false, indexed: true,
+    operators: ["equals", "in", "startsWith"], values,
+    ...(valuesType ? { valuesType } : {}),
+  });
+  const shared: Manifest = {
+    ...manifest,
+    schema: {
+      ...manifest.schema,
+      fields: {
+        ...manifest.schema.fields,
+        colors: field(["B", "G", "R", "U", "W"], "Color"),
+        color_identity: field(["B", "G", "R", "U", "W"], "Color"),
+        color_indicator: field(["B", "G", "R", "U", "W"], "Color"),
+        // a genuinely different set, sharing nothing — proves it generalises past one name
+        rarity: field(["common", "mythic", "rare"], "Rarity"),
+        // and an undeclared field keeps its own per-field alias
+        lang: field(["de", "en", "ja"]),
+      },
+    },
+  };
+  const output = generateSchemaTs(shared, "0.1.0");
+
+  test("emits each shared union exactly once, under the declared name", () => {
+    expect(output.split('export type Color = "B" | "G" | "R" | "U" | "W";')).toHaveLength(2);
+    expect(output).toContain('export type Rarity = "common" | "mythic" | "rare";');
+  });
+
+  test("does not also emit per-field aliases for the fields that declared a name", () => {
+    expect(output).not.toMatch(/MoviesColors\b/);
+    expect(output).not.toMatch(/MoviesColor_identity\b/);
+    expect(output).not.toMatch(/MoviesColor_indicator\b/);
+  });
+
+  test("leaves undeclared fields with their own alias", () => {
+    expect(output).toMatch(/export type MoviesLang = "de" \| "en" \| "ja";/);
+  });
+
+  test("narrowing is unaffected — every field still carries its own values tuple", () => {
+    const schemaBlock = output.slice(output.indexOf("export const schema"));
+    for (const f of ["colors", "color_identity", "color_indicator", "rarity", "lang"]) {
+      expect(schemaBlock).toContain(`${f}: { kind: "string"`);
+    }
+    expect(schemaBlock).toMatch(/colors: \{[^}]*values: \["B", "G", "R", "U", "W"\]/);
+  });
+});

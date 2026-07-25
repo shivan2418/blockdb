@@ -49,6 +49,17 @@ export interface FieldConfig {
    */
   values?: string[];
   /**
+   * Names the value union so several fields can SHARE one emitted type instead of each getting its own
+   * near-duplicate alias. Requires `values`. Any number of fields may declare the same name, and a
+   * config may declare as many distinct shared names as it likes.
+   *
+   * Codegen cannot infer this: it can see that two fields' value sets are equal *today*, not that they
+   * are the same concept. On real card data `colors` and `color_identity` coincide while
+   * `produced_mana` adds two more values — collapsing them automatically would let one field accept
+   * the other's values. So the sharing is declared, and `build` fails if the sets ever diverge.
+   */
+  valuesType?: string;
+  /**
    * The TypeScript type codegen should emit for this payload field instead of `unknown`, as a type
    * expression (`ImageUris`, `CardFace[]`, `Record<string, string | null>`). Requires `kind: "json"`.
    *
@@ -143,6 +154,8 @@ export interface FieldSchemaEntry {
   pk?: true;
   /** The field's closed value set, for codegen's value union — omitted unless configured (mirrors the runtime's optional `FieldMeta.values`). */
   values?: readonly string[];
+  /** Shared name for this field's value union, when several fields declare one type between them. */
+  valuesType?: string;
   /** A payload field's declared TypeScript type, emitted in place of `unknown` — omitted unless configured. Never validated against the data. */
   tsType?: string;
   /** The import statement `tsType` needs, emitted verbatim above the generated interface — omitted unless configured. */

@@ -397,3 +397,54 @@ describe("resolveConfig — enum-like value unions", () => {
     );
   });
 });
+
+describe("resolveConfig — valuesType", () => {
+  const enumField = (values: string[], valuesType?: string) => ({
+    kind: "string" as const, indexed: true, values, ...(valuesType ? { valuesType } : {}),
+  });
+
+  test("accepts many fields sharing one name, and many distinct names side by side", () => {
+    const cfg: StaticShardConfig = {
+      ...base,
+      schema: {
+        ...base.schema,
+        fields: {
+          ...base.schema.fields,
+          colors: enumField(["B", "W"], "Color"),
+          color_identity: enumField(["B", "W"], "Color"),
+          rarity: enumField(["common", "rare"], "Rarity"),
+        },
+      },
+    };
+    const r = resolveConfig(cfg, "/repo");
+    expect(r.fields.colors!.valuesType).toBe("Color");
+    expect(r.fields.rarity!.valuesType).toBe("Rarity");
+  });
+
+  test("rejects fields that share a name but disagree on values — the shared type would lie for one", () => {
+    // The real trap: `colors` and `produced_mana` look alike until produced_mana gains C and T.
+    const cfg: StaticShardConfig = {
+      ...base,
+      schema: {
+        ...base.schema,
+        fields: {
+          ...base.schema.fields,
+          colors: enumField(["B", "W"], "Color"),
+          produced_mana: enumField(["B", "C", "W"], "Color"),
+        },
+      },
+    };
+    expect(() => resolveConfig(cfg, "/repo")).toThrow(/valuesType "Color"[\s\S]*differ|differ[\s\S]*Color/);
+  });
+
+  test("rejects valuesType without values, and a name that isn't a valid type name", () => {
+    const withField = (f: Record<string, unknown>): StaticShardConfig => ({
+      ...base,
+      schema: { ...base.schema, fields: { ...base.schema.fields, x: f as never } },
+    });
+    expect(() => resolveConfig(withField({ kind: "string", indexed: true, valuesType: "Color" }), "/repo")).toThrow(/no "values"/);
+    expect(() =>
+      resolveConfig(withField({ kind: "string", indexed: true, values: ["a"], valuesType: "not a type" }), "/repo"),
+    ).toThrow(/valid TypeScript type name/);
+  });
+});

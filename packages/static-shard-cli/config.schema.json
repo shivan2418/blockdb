@@ -159,6 +159,10 @@
           "uniqueItems": true,
           "description": "The field's closed value set. Codegen exports it as a named union and narrows equals/in/some to it (fragment operators startsWith/contains/endsWith stay wide). Inferred for enum-like fields; delete it to widen the field back to plain string. Requires kind \"string\" and indexed: true."
         },
+        "valuesType": {
+          "type": "string",
+          "description": "Name the value union so several fields share ONE emitted type instead of each getting a near-duplicate alias. Requires `values`. Any number of fields may declare the same name, and a config may declare many distinct names. Codegen cannot infer this — it can see that two value sets are equal today, not that they are the same concept — so `build` fails if fields sharing a name ever disagree on their values."
+        },
         "tsType": {
           "type": "string",
           "description": "For \"json\" fields only: the TypeScript type codegen emits instead of `unknown`, as a type expression (e.g. \"ImageUris\", \"CardFace[]\", \"Record<string, string | null>\"). An UNCHECKED assertion — static-shard stores and returns the payload verbatim and never validates it against this type."

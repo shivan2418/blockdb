@@ -153,6 +153,30 @@ export interface InitResult {
   warnings: string[];
 }
 
+/**
+ * Points out fields whose value unions are identical, so codegen would emit the same literal union
+ * several times over. Only a suggestion: identical *today* does not prove same concept — on real card
+ * data `colors` and `color_identity` coincide while `produced_mana` adds two values — so the sharing
+ * has to be the user's call via `valuesType`, and this just makes the option discoverable.
+ */
+function duplicateValueUnionHints(fields: Record<string, FieldConfig>): string[] {
+  const groups = new Map<string, string[]>();
+  for (const [name, field] of Object.entries(fields)) {
+    if (field.values === undefined || field.valuesType !== undefined) continue;
+    const key = [...field.values].sort().join("\u0000");
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(name);
+  }
+  return [...groups.entries()]
+    .filter(([, names]) => names.length > 1)
+    .map(
+      ([key, names]) =>
+        `static-shard: ${names.join(", ")} all have the same value set [${key.split("\u0000").join(", ")}], so codegen ` +
+        `emits that union once per field. If they are the same concept, give them a shared name with ` +
+        `"valuesType": "YourName" — build then fails if a future refresh makes them diverge, instead of ` +
+        `quietly widening one of them.`,
+    );
+}
+
 /** Flags that only mean something on a queryable field; `config.ts` rejects all of them on a `json` field. */
 const QUERY_FLAGS = ["indexed", "endsWith", "contains", "multi", "absent"] as const;
 
@@ -268,6 +292,9 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       // silently discarding work. Dropped if the field stopped being a payload field, since a scalar
       // kind can't carry a tsType (config.ts rejects it).
       const priorField = existing?.schema.fields[name];
+      // `valuesType` is hand-authored (only the user knows two fields are the same concept), so
+      // --reinfer must carry it over — but only while the field still HAS a value union to name.
+      if (isIndexed && f.values && priorField?.valuesType !== undefined) cfg.valuesType = priorField.valuesType;
       if (f.kind === "json" && priorField?.tsType !== undefined) {
         cfg.tsType = priorField.tsType;
         if (priorField.tsImport !== undefined) cfg.tsImport = priorField.tsImport;
@@ -324,7 +351,12 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     }
   }
 
-  return { configPath: opts.configPath, config, reinferred, warnings: [...repaired.warnings, ...shapeWarnings] };
+  return {
+    configPath: opts.configPath,
+    config,
+    reinferred,
+    warnings: [...repaired.warnings, ...shapeWarnings, ...duplicateValueUnionHints(config.schema.fields)],
+  };
 }
 
 /**
