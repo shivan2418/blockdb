@@ -3,12 +3,40 @@ import type { Compression, FieldSchemaEntry, Manifest } from "./types.js";
 const IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 /**
- * A valid TS type name from an arbitrary collection name: non-identifier chars (e.g. the hyphens in
- * a filename-derived `default-cards-2026`) become `_`, and a leading digit gets an `_` prefix.
+ * A valid PascalCase TS type name from an arbitrary field or collection name: split on every
+ * non-identifier run (the hyphens in a filename-derived `default-cards-2026`, the underscore in
+ * `color_identity`, a dot in `set.name`), capitalize each segment, and prefix `_` if the result would
+ * start with a digit. Previously only the first character was uppercased, which left snake_case intact
+ * and produced names like `CardsColor_identity`.
  */
 function typeNameFor(name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9_$]/g, "_").replace(/^([0-9])/, "_$1") || "_";
-  return safe[0]!.toUpperCase() + safe.slice(1);
+  const segments = name.split(/[^A-Za-z0-9$]+/).filter((segment) => segment.length > 0);
+  if (segments.length === 0) return "_";
+  const pascal = segments.map((segment) => segment[0]!.toUpperCase() + segment.slice(1)).join("");
+  return /^[0-9]/.test(pascal) ? `_${pascal}` : pascal;
+}
+
+/**
+ * Guards the one hazard of mangling names down to identifiers: two distinct fields can collapse onto
+ * the same type name (`_id` and `id`, or `color_identity` beside `colorIdentity`), which would emit
+ * duplicate `export type` declarations and generate a file that cannot compile. Fail with the fix
+ * named rather than writing broken output.
+ */
+function assertNoTypeNameCollisions(emitted: { name: string; source: string }[]): void {
+  const byName = new Map<string, string[]>();
+  for (const { name, source } of emitted) {
+    const sources = byName.get(name);
+    if (sources) sources.push(source);
+    else byName.set(name, [source]);
+  }
+  for (const [name, sources] of byName) {
+    if (sources.length < 2) continue;
+    throw new Error(
+      `static-shard: fields ${sources.map((s) => `"${s}"`).join(" and ")} both generate the type name ` +
+        `"${name}", which would emit duplicate exports. Give one of them an explicit "valuesType" to ` +
+        `separate them, or rename a field upstream.`,
+    );
+  }
 }
 
 /** An object/interface key: emitted bare when it's a valid identifier, otherwise quoted (`"a-b": …`). */
@@ -103,11 +131,17 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
     sharedNames.push(field.valuesType);
   }
 
+  const perField = valued
+    .filter(([, field]) => field.valuesType === undefined)
+    .map(([name, field]) => ({ name: `${typeName}${typeNameFor(name)}`, source: name, union: unionOf(field.values!) }));
+  assertNoTypeNameCollisions([
+    ...sharedNames.map((name) => ({ name, source: `valuesType "${name}"` })),
+    ...perField,
+  ]);
+
   const valueUnions = [
     ...sharedNames.map((name) => `export type ${name} = ${sharedUnions.get(name)!};`),
-    ...valued
-      .filter(([, field]) => field.valuesType === undefined)
-      .map(([name, field]) => `export type ${typeName}${typeNameFor(name)} = ${unionOf(field.values!)};`),
+    ...perField.map((entry) => `export type ${entry.name} = ${entry.union};`),
   ].join("\n");
   const valueUnionBlock = valueUnions ? `${valueUnions}\n\n` : "";
 

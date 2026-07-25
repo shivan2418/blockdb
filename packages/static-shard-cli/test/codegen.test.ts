@@ -214,16 +214,17 @@ describe("codegen — collection names that aren't valid identifiers", () => {
     schema: { ...manifest.schema, collection: "default-cards-20260721211623" },
   };
 
-  test("sanitizes the record type name to a valid identifier", () => {
+  test("sanitizes the record type name to a valid PascalCase identifier", () => {
     const output = generateSchemaTs(gnarly, "0.1.0");
-    expect(output).toContain("export interface Default_cards_20260721211623 {");
+    expect(output).toContain("export interface DefaultCards20260721211623 {");
     expect(output).not.toMatch(/interface Default-cards/);
+    expect(output).not.toMatch(/interface Default_cards/);
   });
 
   test("quotes the collection key everywhere it's used as an object/interface key", () => {
     const schema = generateSchemaTs(gnarly, "0.1.0");
     const client = generateClientTs(gnarly, { basePath: "/shard-data", generatorVersion: "0.1.0" });
-    expect(schema).toContain('"default-cards-20260721211623": Default_cards_20260721211623;');
+    expect(schema).toContain('"default-cards-20260721211623": DefaultCards20260721211623;');
     expect(client).toContain('"default-cards-20260721211623": Collection<');
     // No bare (unquoted) hyphenated key survives — that would be a TS syntax error.
     expect(schema).not.toMatch(/\n\s*default-cards-20260721211623:/);
@@ -304,7 +305,7 @@ describe("generateSchemaTs — enum-like value unions", () => {
       },
     };
     const out = generateSchemaTs(gnarly, "0.1.0");
-    expect(out).toContain('export type MoviesBorder_color = "black" | "white";');
+    expect(out).toContain('export type MoviesBorderColor = "black" | "white";');
     expect(out).toContain('"border-color": { kind: "string"');
   });
 });
@@ -354,5 +355,43 @@ describe("generateSchemaTs — valuesType shares one union across fields", () =>
       expect(schemaBlock).toContain(`${f}: { kind: "string"`);
     }
     expect(schemaBlock).toMatch(/colors: \{[^}]*values: \["B", "G", "R", "U", "W"\]/);
+  });
+});
+
+describe("generateSchemaTs — generated type names are PascalCase", () => {
+  const valued = (values: string[]) => ({
+    kind: "string" as const, isDate: false, indexed: true, operators: ["equals", "in"], values,
+  });
+  const withFields = (fields: Record<string, ReturnType<typeof valued>>): Manifest => ({
+    ...manifest,
+    schema: { ...manifest.schema, fields: { ...manifest.schema.fields, ...fields } },
+  });
+
+  test("snake_case, kebab-case and dotted field names all become PascalCase", () => {
+    const output = generateSchemaTs(
+      withFields({
+        color_identity: valued(["B", "W"]),
+        "frame-effects": valued(["etched"]),
+        "set.name": valued(["Vintage Masters"]),
+      }),
+      "0.1.0",
+    );
+    expect(output).toContain("export type MoviesColorIdentity =");
+    expect(output).toContain("export type MoviesFrameEffects =");
+    expect(output).toContain("export type MoviesSetName =");
+    // the old shape, which is not a name anyone wants
+    expect(output).not.toMatch(/Movies[A-Za-z]*_[a-z]/);
+  });
+
+  test("a leading digit still gets prefixed so the name stays a valid identifier", () => {
+    expect(generateSchemaTs(withFields({ "2fa_status": valued(["on"]) }), "0.1.0")).toContain("export type Movies_2faStatus =");
+  });
+
+  test("two field names that collapse to the same type name fail loudly instead of emitting duplicate exports", () => {
+    // `_id` and `id`, or snake and camel spellings of one name, both mangle to one identifier — which
+    // would generate a TS file that cannot compile. Fail with the remedy named.
+    expect(() => generateSchemaTs(withFields({ color_identity: valued(["B"]), colorIdentity: valued(["B"]) }), "0.1.0")).toThrow(
+      /MoviesColorIdentity[\s\S]*valuesType|valuesType[\s\S]*MoviesColorIdentity/,
+    );
   });
 });
