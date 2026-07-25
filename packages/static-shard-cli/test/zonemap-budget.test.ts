@@ -82,4 +82,37 @@ describe("spillOversizedZonemaps", () => {
     const finalGzipBytes = gzipSync(JSON.stringify(result.manifest)).length;
     expect(finalGzipBytes).toBeLessThanOrEqual(MANIFEST_BUDGET_BYTES);
   });
+
+  test("under budget → no warning", () => {
+    const manifest = baseManifest();
+    manifest.zonemap.title = { pairs: [["Alpha", "Zeta"]], truncated: true };
+
+    expect(spillOversizedZonemaps(manifest).warning).toBeUndefined();
+  });
+
+  test("still over budget after spilling everything spillable → warns (ADR-0003 §3 'build warns past it')", () => {
+    const manifest = baseManifest();
+    // Index chunk directories are routing-essential and never spill (ADR-0003 §3), so a manifest
+    // whose bulk lives there has no relief valve — the exact case that must not pass silently.
+    manifest.indexes.oracle_text = {
+      operators: ["equals", "in", "startsWith"],
+      chunks: Array.from({ length: 55_000 }, (_, i) => ({
+        from: pseudoRandomHex(i * 2),
+        to: pseudoRandomHex(i * 2 + 1),
+        file: `index/oracle_text/${pseudoRandomHex(i + 5_000_000)}${pseudoRandomHex(i + 9_000_000)}.json`,
+      })),
+    };
+    manifest.zonemap.director = { pairs: highEntropyPairs(20_000, 0), truncated: true };
+
+    const result = spillOversizedZonemaps(manifest);
+
+    // it still spilled what it could — the warning is in addition to, not instead of, spilling
+    expect(result.manifest.zonemap.director).toHaveProperty("sidecar");
+    expect(gzipSync(JSON.stringify(result.manifest)).length).toBeGreaterThan(MANIFEST_BUDGET_BYTES);
+
+    expect(result.warning).toMatch(/manifest/i);
+    // names the real cause (index chunk directories, not zonemaps) and the actionable lever
+    expect(result.warning).toContain("oracle_text");
+    expect(result.warning).toMatch(/index chunk director/i);
+  });
 });

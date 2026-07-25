@@ -7,6 +7,35 @@ export interface ZonemapSpillResult {
   manifest: Manifest;
   /** Sidecar files to write alongside shards/index chunks, content-hashed and referenced from the (now-lighter) root manifest. */
   sidecarFiles: { relPath: string; content: string }[];
+  /**
+   * Set when spilling every spillable zonemap still left the root over budget — ADR-0003 §3's
+   * "build warns past it". Secondary zonemaps are the only relief valve, so once they're all gone
+   * the remaining bulk is routing-essential (index chunk directories, shard identity) and the only
+   * lever left is the config: fewer indexed fields, or fewer `contains`/`endsWith` opt-ins.
+   */
+  warning?: string;
+}
+
+/** The indexed fields whose chunk directories weigh most in the root manifest, heaviest first. */
+function heaviestIndexFields(manifest: Manifest, limit: number): string[] {
+  return Object.entries(manifest.indexes)
+    .map(([field, descriptor]) => ({ field, size: JSON.stringify(descriptor).length }))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, limit)
+    .map(({ field }) => field);
+}
+
+function overBudgetWarning(manifest: Manifest, gzipBytes: number, spilledCount: number): string {
+  const heaviest = heaviestIndexFields(manifest, 3);
+  return (
+    `static-shard: the root manifest is ${Math.round(gzipBytes / 1024)} KB gzipped, over the ` +
+    `${Math.round(MANIFEST_BUDGET_BYTES / 1024)} KB budget (ADR-0003 §3), and all ${spilledCount} ` +
+    `secondary zonemap(s) have already been spilled to sidecars. What's left is routing-essential and ` +
+    `cannot spill — mostly index chunk directories` +
+    (heaviest.length > 0 ? ` (heaviest: ${heaviest.join(", ")})` : "") +
+    `. Every client downloads this file before its first query; reduce it by indexing fewer fields, or ` +
+    `by turning off contains/endsWith on the fields above.`
+  );
 }
 
 function manifestGzipBytes(manifest: Manifest): number {
@@ -30,6 +59,7 @@ export function spillOversizedZonemaps(manifest: Manifest): ZonemapSpillResult {
 
   let current = manifest;
   const sidecarFiles: { relPath: string; content: string }[] = [];
+  let gzipBytes = manifestGzipBytes(current);
 
   for (;;) {
     const candidates = Object.entries(current.zonemap)
@@ -46,8 +76,14 @@ export function spillOversizedZonemaps(manifest: Manifest): ZonemapSpillResult {
 
     current = { ...current, zonemap: { ...current.zonemap, [field]: { sidecar: relPath } } };
 
-    if (manifestGzipBytes(current) <= MANIFEST_BUDGET_BYTES) break;
+    gzipBytes = manifestGzipBytes(current);
+    if (gzipBytes <= MANIFEST_BUDGET_BYTES) break;
   }
 
+  // Spilling is best-effort: it can run out of spillable zonemaps while still over budget, which
+  // must not pass silently (ADR-0003 §3).
+  if (gzipBytes > MANIFEST_BUDGET_BYTES) {
+    return { manifest: current, sidecarFiles, warning: overBudgetWarning(current, gzipBytes, sidecarFiles.length) };
+  }
   return { manifest: current, sidecarFiles };
 }

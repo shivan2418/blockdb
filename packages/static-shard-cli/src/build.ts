@@ -170,8 +170,9 @@ export function materialize(
 
   // Root-manifest budget (ADR-0003 §3): spill the largest secondary zonemaps to per-field
   // sidecars, largest first, until the gzipped root is back under budget.
-  const { manifest, sidecarFiles } = spillOversizedZonemaps(rawManifest);
+  const { manifest, sidecarFiles, warning: budgetWarning } = spillOversizedZonemaps(rawManifest);
   indexFiles.push(...sidecarFiles);
+  if (budgetWarning) warnings.push(budgetWarning);
 
   const maxRecordBytes = records.reduce((max, r) => Math.max(max, Buffer.byteLength(JSON.stringify(r), "utf8")), 0);
   const oversizedWarning = oversizedRecordWarning(maxRecordBytes, resolved.shardBytes);
