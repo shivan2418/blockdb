@@ -44,6 +44,12 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
   for (const [name, field] of Object.entries(config.schema.fields)) {
     const isSortField = name === sortField;
 
+    if (field.kind === "json" && (field.indexed === true || field.endsWith || field.contains || field.multi || isSortField)) {
+      throw new Error(
+        `static-shard: field "${name}" is kind "json" (payload-only) — it cannot be indexed, sorted on, or given endsWith/contains/multi. Give it a scalar kind to make it queryable.`,
+      );
+    }
+
     if (field.endsWith || field.contains) {
       const opt = field.endsWith ? "endsWith" : "contains";
       if (field.kind !== "string") {

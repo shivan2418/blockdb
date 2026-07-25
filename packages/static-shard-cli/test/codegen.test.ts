@@ -122,3 +122,50 @@ describe("generateClientTs", () => {
     expect(output).toContain("export function connect(");
   });
 });
+
+describe("generateSchemaTs — payload-only json fields", () => {
+  const jsonManifest: Manifest = {
+    ...manifest,
+    schema: {
+      ...manifest.schema,
+      fields: {
+        ...manifest.schema.fields,
+        image_uris: { kind: "json", isDate: false, indexed: false, operators: [] },
+      },
+    },
+  };
+  const output = generateSchemaTs(jsonManifest, "0.1.0");
+
+  test("a json field is an optional `unknown` in the record interface", () => {
+    expect(output).toMatch(/image_uris\?:\s*unknown;/);
+  });
+
+  test("a json field never appears in the queryable schema descriptor", () => {
+    const schemaBlock = output.slice(output.indexOf("export const schema"));
+    expect(schemaBlock).not.toContain("image_uris");
+  });
+});
+
+describe("codegen — collection names that aren't valid identifiers", () => {
+  const gnarly: Manifest = {
+    ...manifest,
+    dataset: { ...manifest.dataset, collection: "default-cards-20260721211623" },
+    schema: { ...manifest.schema, collection: "default-cards-20260721211623" },
+  };
+
+  test("sanitizes the record type name to a valid identifier", () => {
+    const output = generateSchemaTs(gnarly, "0.1.0");
+    expect(output).toContain("export interface Default_cards_20260721211623 {");
+    expect(output).not.toMatch(/interface Default-cards/);
+  });
+
+  test("quotes the collection key everywhere it's used as an object/interface key", () => {
+    const schema = generateSchemaTs(gnarly, "0.1.0");
+    const client = generateClientTs(gnarly, { basePath: "/shard-data", generatorVersion: "0.1.0" });
+    expect(schema).toContain('"default-cards-20260721211623": Default_cards_20260721211623;');
+    expect(client).toContain('"default-cards-20260721211623": Collection<');
+    // No bare (unquoted) hyphenated key survives — that would be a TS syntax error.
+    expect(schema).not.toMatch(/\n\s*default-cards-20260721211623:/);
+    expect(client).not.toMatch(/\n\s*default-cards-20260721211623:/);
+  });
+});

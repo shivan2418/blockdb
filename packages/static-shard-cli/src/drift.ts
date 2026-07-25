@@ -12,6 +12,9 @@ function expectedTypeof(kind: FieldKind): "string" | "number" | "boolean" {
  */
 export function assertNoSchemaDrift(records: Record<string, unknown>[], fields: Record<string, FieldConfig>): void {
   for (const [name, field] of Object.entries(fields)) {
+    // Payload-only fields are opaque — any JSON value is valid, so there's no kind to drift from.
+    if (field.kind === "json") continue;
+
     for (let i = 0; i < records.length; i++) {
       const value = records[i]![name];
       if (value === undefined || value === null) continue;

@@ -163,6 +163,8 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       delimiter: readDelimiter,
       recordsPath,
       fields: {},
+      // Sampled inference only needs the leading records; a full scan reads everything.
+      limit: opts.fullScan ? undefined : (opts.sampleSize ?? DEFAULT_SAMPLE_SIZE),
     });
     if (allRecords.length === 0) {
       throw new Error(`static-shard: init found no records in "${inputPath}" to infer a schema from`);
@@ -179,10 +181,12 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     fields = {};
     for (const [name, f] of Object.entries(inferred.fields)) {
       const cfg: FieldConfig = { kind: f.kind };
-      const isIndexed = name !== sortField && (defaultIndexed.has(name) || f.multi);
+      const isIndexed = f.kind !== "json" && name !== sortField && (defaultIndexed.has(name) || f.multi);
       if (isIndexed) cfg.indexed = true;
       if (f.multi) cfg.multi = true;
-      if (f.absent && isIndexed) cfg.absent = true;
+      // A multi field can't also be `absent`: T7 has no presence semantics over a string[]'s
+      // elements, and config validation rejects the combination (config.ts).
+      if (f.absent && isIndexed && !f.multi) cfg.absent = true;
       fields[name] = cfg;
     }
   } else {

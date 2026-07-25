@@ -46,11 +46,9 @@ function inferKind(fieldName: string, values: unknown[]): FieldKind {
     return allDates ? "date" : "string";
   }
 
-  throw new Error(
-    `static-shard: init inference — field "${fieldName}" has inconsistent/mixed types across the sample ` +
-      `(e.g. ${JSON.stringify(nonNull[0])} vs ${JSON.stringify(nonNull.find((v) => typeof v !== typeof nonNull[0]))}); ` +
-      `declare it explicitly in schema.fields instead of relying on inference`,
-  );
+  // Nested objects and mixed-scalar-type fields aren't a queryable scalar kind — carry them as
+  // payload-only "json" (ADR-0001) rather than failing the whole init.
+  return "json";
 }
 
 function distinctCount(values: unknown[]): number {
@@ -59,23 +57,29 @@ function distinctCount(values: unknown[]): number {
   return seen.size;
 }
 
+/** A payload-only field: kept in the record and returned by `findMany`, never indexed or queryable (ADR-0001). */
+function payloadField(presentValues: unknown[], recordCount: number): InferredField {
+  return {
+    kind: "json",
+    cardinality: distinctCount(presentValues.filter((v) => v !== null)),
+    absent: presentValues.length < recordCount,
+    multi: false,
+  };
+}
+
 function inferField(fieldName: string, presentValues: unknown[], recordCount: number): InferredField {
   const arrays = presentValues.filter((v) => Array.isArray(v));
   const scalars = presentValues.filter((v) => !Array.isArray(v));
 
+  // A field that mixes arrays and scalars can't be a single queryable kind — carry it as payload.
   if (arrays.length > 0 && scalars.length > 0) {
-    throw new Error(
-      `static-shard: init inference — field "${fieldName}" mixes array and scalar values across the sample; ` +
-        `declare it explicitly in schema.fields instead of relying on inference`,
-    );
+    return payloadField(presentValues, recordCount);
   }
 
   if (arrays.length > 0) {
+    // Only string[] is a queryable multi-valued field (T7); number[]/object[]/mixed become payload.
     if (!arrays.every(isStringArray)) {
-      throw new Error(
-        `static-shard: init inference — field "${fieldName}" is an array in every record but not consistently ` +
-          `an array of strings; multi-valued fields must be string[] (declare it explicitly in schema.fields)`,
-      );
+      return payloadField(presentValues, recordCount);
     }
     const elements = (arrays as string[][]).flat();
     return {
@@ -144,7 +148,7 @@ function recommendIndexedFields(fields: Record<string, InferredField>, recordCou
   const forced = entries.filter(([, f]) => f.multi).map(([name]) => name);
 
   const categorical = entries
-    .filter(([, f]) => !f.multi && f.cardinality > 1 && f.cardinality < recordCount)
+    .filter(([, f]) => f.kind !== "json" && !f.multi && f.cardinality > 1 && f.cardinality < recordCount)
     .sort(([nameA, a], [nameB, b]) => (a.cardinality !== b.cardinality ? a.cardinality - b.cardinality : nameA < nameB ? -1 : 1))
     .slice(0, DEFAULT_MAX_INDEXED)
     .map(([name]) => name);

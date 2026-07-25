@@ -1,4 +1,11 @@
-export type FieldKind = "string" | "number" | "boolean" | "date";
+/**
+ * `"json"` is the payload-only kind: a field whose values aren't a queryable scalar/date or
+ * `string[]` (nested objects, `number[]`, object arrays, mixed-type fields). It is carried verbatim
+ * in each record's payload and returned by `findMany`, but is never indexed and never appears in
+ * `where`/`orderBy` — the "whole nested payload; only indexed fields are queryable" contract of
+ * ADR-0001. Inference assigns it automatically instead of failing on shapes it can't index.
+ */
+export type FieldKind = "string" | "number" | "boolean" | "date" | "json";
 
 /** Input file shapes accepted by `build` (T9). NDJSON/JSONL is the preferred format (= shard payload format). */
 export type InputFormat = "ndjson" | "json" | "csv" | "tsv";

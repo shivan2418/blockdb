@@ -1,7 +1,19 @@
 import type { Manifest } from "./types.js";
 
-function pascalCase(name: string): string {
-  return name.length === 0 ? name : name[0]!.toUpperCase() + name.slice(1);
+const IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * A valid TS type name from an arbitrary collection name: non-identifier chars (e.g. the hyphens in
+ * a filename-derived `default-cards-2026`) become `_`, and a leading digit gets an `_` prefix.
+ */
+function typeNameFor(name: string): string {
+  const safe = name.replace(/[^A-Za-z0-9_$]/g, "_").replace(/^([0-9])/, "_$1") || "_";
+  return safe[0]!.toUpperCase() + safe.slice(1);
+}
+
+/** An object/interface key: emitted bare when it's a valid identifier, otherwise quoted (`"a-b": …`). */
+function propKey(name: string): string {
+  return IDENTIFIER_RE.test(name) ? name : JSON.stringify(name);
 }
 
 function tsTypeForKind(kind: string): string {
@@ -13,6 +25,7 @@ function tsTypeForKind(kind: string): string {
     case "string":
     case "date":
       return "string";
+    case "json":
     default:
       return "unknown";
   }
@@ -24,14 +37,16 @@ function generatedHeader(generatorVersion: string): string {
 
 export function generateSchemaTs(manifest: Manifest, generatorVersion: string): string {
   const { collection, fields } = manifest.schema;
-  const typeName = pascalCase(collection);
+  const typeName = typeNameFor(collection);
+  const collectionKey = propKey(collection);
   const fieldEntries = Object.entries(fields);
 
   const interfaceLines = fieldEntries
     .map(([name, field]) => {
       const tsType = field.multi ? `${tsTypeForKind(field.kind)}[]` : tsTypeForKind(field.kind);
-      const optional = field.absent ? "?" : "";
-      return `  ${name}${optional}: ${tsType};`;
+      // Payload-only "json" fields are opaque and their presence isn't tracked — always optional.
+      const optional = field.absent || field.kind === "json" ? "?" : "";
+      return `  ${propKey(name)}${optional}: ${tsType};`;
     })
     .join("\n");
 
@@ -42,7 +57,7 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
       const multi = field.multi ? ", multi: true" : "";
       const absent = field.absent ? ", absent: true" : "";
       const pk = field.pk ? ", pk: true" : "";
-      return `      ${name}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${pk} },`;
+      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${pk} },`;
     })
     .join("\n");
 
@@ -54,11 +69,11 @@ ${interfaceLines}
 }
 
 export interface Records {
-  ${collection}: ${typeName};
+  ${collectionKey}: ${typeName};
 }
 
 export const schema = {
-  ${collection}: {
+  ${collectionKey}: {
 ${pkLine}    fields: {
 ${indexedFieldLines}
     },
@@ -71,13 +86,15 @@ export type Schema = typeof schema;
 
 export function generateClientTs(manifest: Manifest, opts: { basePath: string; generatorVersion: string }): string {
   const { collection } = manifest.schema;
+  const collectionKey = propKey(collection);
+  const collectionIndex = JSON.stringify(collection);
 
   return `${generatedHeader(opts.generatorVersion)}
 import { createClient, type Collection, type ClientOptions, type GenericClient } from "static-shard";
 import { schema, type Schema, type Records } from "./schema.js";
 
 export interface Db {
-  ${collection}: Collection<Schema["${collection}"], Records["${collection}"]>;
+  ${collectionKey}: Collection<Schema[${collectionIndex}], Records[${collectionIndex}]>;
 }
 
 const DEFAULT_BASE_PATH = ${JSON.stringify(opts.basePath)};

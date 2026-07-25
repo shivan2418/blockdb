@@ -91,7 +91,8 @@
       "additionalProperties": false,
       "properties": {
         "kind": {
-          "enum": ["string", "number", "boolean", "date"]
+          "enum": ["string", "number", "boolean", "date", "json"],
+          "description": "\"json\" is payload-only: carried in each record but never indexed or queryable."
         },
         "indexed": {
           "type": "boolean",
@@ -130,6 +131,15 @@
         {
           "if": { "required": ["absent"], "properties": { "absent": { "const": true } } },
           "then": { "required": ["indexed"], "properties": { "indexed": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "json" } } },
+          "then": { "not": { "anyOf": [
+            { "required": ["indexed"], "properties": { "indexed": { "const": true } } },
+            { "required": ["endsWith"], "properties": { "endsWith": { "const": true } } },
+            { "required": ["contains"], "properties": { "contains": { "const": true } } },
+            { "required": ["multi"], "properties": { "multi": { "const": true } } }
+          ] } }
         }
       ]
     }

@@ -29,9 +29,22 @@ describe("inferSchema — field kind detection", () => {
     expect(inferSchema(records).fields.rating!.kind).toBe("number");
   });
 
-  test("throws a clear error for a field with inconsistent, non-coercible types across the sample", () => {
-    const records = [{ code: 5 }, { code: "five" }];
-    expect(() => inferSchema(records)).toThrow(/code.*inconsistent|inconsistent.*code|mixed/i);
+  test("carries a field with inconsistent, non-coercible scalar types as payload-only json", () => {
+    const records = [
+      { id: 1, code: 5 },
+      { id: 2, code: "five" },
+    ];
+    expect(inferSchema(records).fields.code!.kind).toBe("json");
+  });
+
+  test("carries a nested-object field as payload-only json", () => {
+    const records = [
+      { id: 1, prices: { usd: "1.50", eur: "1.20" } },
+      { id: 2, prices: { usd: "2.00" } },
+    ];
+    const field = inferSchema(records).fields.prices!;
+    expect(field.kind).toBe("json");
+    expect(field.multi).toBe(false);
   });
 });
 
@@ -77,12 +90,25 @@ describe("inferSchema — cardinality / absent / multi", () => {
     expect(inferSchema(records).fields.genres!.cardinality).toBe(2);
   });
 
-  test("throws a clear error when a field mixes array and scalar shapes across the sample", () => {
+  test("carries a field that mixes array and scalar shapes as payload-only json", () => {
     const records = [
       { year: 1999, tags: ["a", "b"] },
       { year: 2000, tags: "c" },
     ];
-    expect(() => inferSchema(records)).toThrow(/tags/);
+    const field = inferSchema(records).fields.tags!;
+    expect(field.kind).toBe("json");
+    expect(field.multi).toBe(false);
+  });
+
+  test("carries a non-string array (number[] / object[]) as payload-only json, not a multi field", () => {
+    const records = [
+      { year: 1999, multiverseIds: [668564], parts: [{ id: "a" }] },
+      { year: 2000, multiverseIds: [12, 34], parts: [{ id: "b" }] },
+    ];
+    const fields = inferSchema(records).fields;
+    expect(fields.multiverseIds!.kind).toBe("json");
+    expect(fields.multiverseIds!.multi).toBe(false);
+    expect(fields.parts!.kind).toBe("json");
   });
 });
 
