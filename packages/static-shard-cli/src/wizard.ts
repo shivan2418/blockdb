@@ -11,6 +11,7 @@ import {
 } from "./estimator.js";
 import { DEFAULT_INDEX_CHUNK_BYTES } from "./config.js";
 import { inferSchema, isSortFieldCandidate } from "./infer.js";
+import type { PopulationStats } from "./input.js";
 import { lowCardinalitySortFieldWarning, oversizedRecordWarning } from "./warnings.js";
 import type { FieldConfig, FieldKind } from "./types.js";
 
@@ -36,6 +37,7 @@ export interface WizardField {
 }
 
 export interface WizardData {
+  /** The TRUE total record count across the whole dataset — not the sample size (`records.length`). */
   recordCount: number;
   /** Alphabetical — the type-to-filter query (ADR-0006 §5), not field order, is what makes a
    * ~90-field real dataset navigable, so a stable, predictable order is more useful than a heuristic one. */
@@ -47,6 +49,8 @@ export interface WizardData {
   sortCandidates: string[];
   /** The (sample or full-scan) records the wizard's live estimates are profiled against. */
   records: Record<string, unknown>[];
+  /** True whole-dataset totals so size/shard estimates reflect the full input even when `records` is a sample. */
+  population: PopulationStats;
 }
 
 /**
@@ -57,7 +61,7 @@ export interface WizardData {
  * existing baked schema interactively is out of scope for T12 (already served by `init --yes` without
  * `--reinfer`).
  */
-export function buildWizardData(records: Record<string, unknown>[]): WizardData {
+export function buildWizardData(records: Record<string, unknown>[], population?: PopulationStats): WizardData {
   if (records.length === 0) {
     throw new Error("static-shard: the wizard found no records in the input to infer a schema from");
   }
@@ -68,14 +72,21 @@ export function buildWizardData(records: Record<string, unknown>[]): WizardData 
 
   const sortCandidates = fields.filter(isSortFieldCandidate).map((f) => f.name);
 
+  // Fall back to the sample as its own population when no true totals are supplied (records IS the dataset).
+  const pop: PopulationStats = population ?? {
+    recordCount: records.length,
+    datasetBytes: records.reduce((sum, r) => sum + Buffer.byteLength(JSON.stringify(r), "utf8"), 0),
+  };
+
   return {
-    recordCount: inferred.recordCount,
+    recordCount: pop.recordCount,
     fields,
     recommendedSortField: inferred.sortField,
     recommendedPk: inferred.pk,
     recommendedIndexed: inferred.indexedFields,
     sortCandidates,
     records,
+    population: pop,
   };
 }
 
@@ -96,7 +107,7 @@ export interface WizardState {
 }
 
 export function createInitialState(data: WizardData): WizardState {
-  const baseline = profileDataset(data.records, { sortField: data.recommendedSortField, fields: {} });
+  const baseline = profileDataset(data.records, { sortField: data.recommendedSortField, fields: {} }, data.population);
   return {
     stage: 0,
     cursor: 0,
@@ -121,7 +132,9 @@ export type WizardKey =
   | { type: "enter" }
   | { type: "backspace" }
   | { type: "char"; value: string }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  | { type: "select-all" }
+  | { type: "invert" };
 
 function matchesQuery(name: string, query: string): boolean {
   return query === "" || name.toLowerCase().includes(query.toLowerCase());
@@ -220,6 +233,28 @@ export function applyKey(data: WizardData, state: WizardState, key: WizardKey): 
       indexedFields.add(picked.name);
       return { ...state, indexedFields };
     }
+    // Both operate over the currently-visible (type-to-filter-narrowed) candidates, not the whole
+    // field set — so filtering down to a subset then selecting-all/inverting acts on just that subset.
+    if (key.type === "select-all") {
+      const indexedFields = new Set(state.indexedFields);
+      for (const f of candidates) indexedFields.add(f.name);
+      return { ...state, indexedFields };
+    }
+    if (key.type === "invert") {
+      const indexedFields = new Set(state.indexedFields);
+      const endsWithFields = new Set(state.endsWithFields);
+      const containsFields = new Set(state.containsFields);
+      for (const f of candidates) {
+        if (indexedFields.has(f.name)) {
+          indexedFields.delete(f.name);
+          endsWithFields.delete(f.name);
+          containsFields.delete(f.name);
+        } else {
+          indexedFields.add(f.name);
+        }
+      }
+      return { ...state, indexedFields, endsWithFields, containsFields };
+    }
     if (key.type === "char") return { ...state, filterQuery: state.filterQuery + key.value, cursor: 0 };
     if (key.type === "backspace") return { ...state, filterQuery: state.filterQuery.slice(0, -1), cursor: 0 };
     return state;
@@ -304,7 +339,7 @@ export interface WizardEstimate {
  */
 export function estimateForState(data: WizardData, state: WizardState): WizardEstimate {
   const forced = forcedIndexedFieldConfigs(data, state.sortField);
-  const masterProfile = profileDataset(data.records, { sortField: state.sortField, fields: forced });
+  const masterProfile = profileDataset(data.records, { sortField: state.sortField, fields: forced }, data.population);
 
   const currentFields: Record<string, FieldConfig> = {};
   const selectedProfileFields: DatasetProfile["fields"] = {};
@@ -335,7 +370,9 @@ export function estimateForState(data: WizardData, state: WizardState): WizardEs
   // an oversized record) — this is the upstream, estimate-time view of the same phenomenon, not a
   // missing warning category.
   const warnings: string[] = [];
-  const lowCard = lowCardinalitySortFieldWarning(data.recordCount, masterProfile.sortFieldCardinality);
+  // Compare at SAMPLE scale: `sortFieldCardinality` is sampled, so the ratio must use the sample
+  // size, not the true total (mixing scales would fire a spurious low-cardinality warning).
+  const lowCard = lowCardinalitySortFieldWarning(data.records.length, masterProfile.sortFieldCardinality);
   if (lowCard) warnings.push(lowCard);
   const oversized = oversizedRecordWarning(masterProfile.maxRecordBytes, state.shardBytes);
   if (oversized) warnings.push(oversized);
@@ -404,14 +441,30 @@ function fmtInt(n: number): string {
   return Math.round(n).toLocaleString("en-US");
 }
 
-const VISIBLE_ROWS = 10;
+/** Assumed terminal height when the real one isn't reported (e.g. not a TTY, or under test). */
+const DEFAULT_TERMINAL_ROWS = 24;
+/** Never render a list window this small, even on a tiny/unreported terminal. */
+const MIN_VISIBLE_ROWS = 3;
+/** `renderFrame`'s own chrome above every stage's body: the title line, the crumbs line, and the blank line before the body starts. */
+const FRAME_CHROME_ROWS = 3;
 
-/** ADR-0006 §5: scrollable list — a fixed window centered on the cursor, not the whole (possibly ~90-field) list. */
-function windowed<T>(items: T[], cursor: number): { items: T[]; offset: number } {
-  if (items.length <= VISIBLE_ROWS) return { items, offset: 0 };
-  const half = Math.floor(VISIBLE_ROWS / 2);
-  const offset = Math.max(0, Math.min(items.length - VISIBLE_ROWS, cursor - half));
-  return { items: items.slice(offset, offset + VISIBLE_ROWS), offset };
+/**
+ * How many list rows a stage can show given the terminal's real height (ADR-0006 §5: "show as many
+ * options at once as the screen can fit," not a fixed page size) minus everything else that stage
+ * is about to render around the list — computed by each render function from its own known
+ * chrome-line count, not guessed here.
+ */
+function visibleRowsFor(terminalRows: number | undefined, chromeLines: number): number {
+  const rows = terminalRows ?? DEFAULT_TERMINAL_ROWS;
+  return Math.max(MIN_VISIBLE_ROWS, rows - FRAME_CHROME_ROWS - chromeLines);
+}
+
+/** ADR-0006 §5: scrollable list — a window centered on the cursor, sized to fill the terminal rather than a fixed page. */
+function windowed<T>(items: T[], cursor: number, visibleRows: number): { items: T[]; offset: number } {
+  if (items.length <= visibleRows) return { items, offset: 0 };
+  const half = Math.floor(visibleRows / 2);
+  const offset = Math.max(0, Math.min(items.length - visibleRows, cursor - half));
+  return { items: items.slice(offset, offset + visibleRows), offset };
 }
 
 /**
@@ -481,90 +534,98 @@ function renderDetect(data: WizardData): string[] {
   return lines;
 }
 
-function renderSortField(data: WizardData, state: WizardState, estimate: WizardEstimate): string[] {
+function renderSortField(data: WizardData, state: WizardState, estimate: WizardEstimate, terminalRows?: number): string[] {
   const candidates = sortCandidateFields(data, state);
-  const lines = [
+  const header = [
     bold("Pick ONE field to sort by."),
     dim("  Free range filtering (before/after, less/greater) on this field; every other field needs an index."),
     "",
   ];
-  if (state.filterQuery) lines.push(dim(`  filter: "${state.filterQuery}"`), "");
-  const { items, offset } = windowed(candidates, state.cursor);
-  items.forEach((f, i) => {
+  const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
+  const noMatchLine = candidates.length === 0 ? [dim("  no matching fields")] : [];
+  const footer = ["", ...estimateAxes(estimate.costs).dataFiles, "", dim("  [↑/↓] move  [space] choose  [type] filter  [←/→] change step")];
+  const chromeLines = header.length + filterLine.length + noMatchLine.length + footer.length;
+
+  const { items, offset } = windowed(candidates, state.cursor, visibleRowsFor(terminalRows, chromeLines));
+  const rows = items.map((f, i) => {
     const idx = offset + i;
     const selected = f.name === state.sortField;
     const marker = selected ? color(ANSI.green, "◉") : "○";
     const rec = f.name === data.recommendedSortField ? color(ANSI.green, " ★ recommended") : "";
     const plain = `  ${marker} ${pad(f.name, 22)} ${dim(pad(f.kind + " · " + fmtInt(f.cardinality) + " distinct", 28))}${rec}`;
-    lines.push(renderRow(plain, { cursor: idx === state.cursor }));
+    return renderRow(plain, { cursor: idx === state.cursor });
   });
-  if (candidates.length === 0) lines.push(dim("  no matching fields"));
-  lines.push("", ...estimateAxes(estimate.costs).dataFiles);
-  lines.push("", dim("  [↑/↓] move  [space] choose  [type] filter  [←/→] change step"));
-  return lines;
+
+  return [...header, ...filterLine, ...rows, ...noMatchLine, ...footer];
 }
 
-function renderFilterFields(data: WizardData, state: WizardState, estimate: WizardEstimate): string[] {
+function renderFilterFields(data: WizardData, state: WizardState, estimate: WizardEstimate, terminalRows?: number): string[] {
   const candidates = filterableFields(data, state);
-  const lines = [
+  const header = [
     bold("Which fields do you want to filter on?"),
     dim("  Only indexed fields are queryable. Each one adds a little to the first download, plus an index that loads only when a query uses it."),
     "",
   ];
-  if (state.filterQuery) lines.push(dim(`  filter: "${state.filterQuery}"`), "");
-  const { items, offset } = windowed(candidates, state.cursor);
-  items.forEach((f, i) => {
+  const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
+  const noMatchLine = candidates.length === 0 ? [dim("  no matching fields")] : [];
+  const footer = [
+    "",
+    ...estimateAxes(estimate.costs).firstDownload,
+    "",
+    dim("  [↑/↓] move  [space] toggle  [ctrl+a] select all  [tab] invert  [type] filter  [←/→] change step"),
+  ];
+  const chromeLines = header.length + filterLine.length + noMatchLine.length + footer.length;
+
+  const { items, offset } = windowed(candidates, state.cursor, visibleRowsFor(terminalRows, chromeLines));
+  const rows = items.map((f, i) => {
     const idx = offset + i;
     const on = state.indexedFields.has(f.name);
     const box = on ? color(ANSI.green, "[x]") : dim("[ ]");
     const idxEstimate = estimate.costs.indexes[f.name];
     const cost = on && idxEstimate ? dim(`index loads on use: ${fmtBytes(idxEstimate.baseBytes)}`) : dim("not indexed");
     const plain = `  ${box} ${pad(f.name, 22)} ${cost}`;
-    lines.push(renderRow(plain, { cursor: idx === state.cursor }));
+    return renderRow(plain, { cursor: idx === state.cursor });
   });
-  if (candidates.length === 0) lines.push(dim("  no matching fields"));
-  lines.push("", ...estimateAxes(estimate.costs).firstDownload);
-  lines.push("", dim("  [↑/↓] move  [space] toggle  [type] filter  [←/→] change step"));
-  return lines;
+
+  return [...header, ...filterLine, ...rows, ...noMatchLine, ...footer];
 }
 
-function renderTextSearch(data: WizardData, state: WizardState, estimate: WizardEstimate): string[] {
-  const rows = textSearchRows(data, state);
-  const lines = [
+function renderTextSearch(data: WizardData, state: WizardState, estimate: WizardEstimate, terminalRows?: number): string[] {
+  const allRows = textSearchRows(data, state);
+  const header = [
     bold("Extra ways to search text"),
     dim('  Exact match, "is one of", and starts-with are already on for every indexed text field.'),
     dim("  These add more, each with an extra index that loads only when it's used."),
     "",
   ];
-  if (state.filterQuery) lines.push(dim(`  filter: "${state.filterQuery}"`), "");
-  if (rows.length === 0) {
-    lines.push(dim("  no indexed text fields yet — go back and index one first"));
-  } else {
-    const { items, offset } = windowed(rows, state.cursor);
-    items.forEach((row, i) => {
-      const idx = offset + i;
-      const on = row.operator === "endsWith" ? state.endsWithFields.has(row.field) : state.containsFields.has(row.field);
-      const box = on ? color(ANSI.green, "[x]") : dim("[ ]");
-      let costText: string;
-      let danger = false;
-      if (row.operator === "endsWith") {
-        const probe = estimate.probeIndex(row.field, { endsWith: true });
-        costText = `adds ${fmtBytes(probe.reversedBytes ?? 0)}`;
-      } else {
-        const probe = estimate.probeIndex(row.field, { contains: true });
-        danger = probe.containsExceedsColumn === true;
-        costText = danger
-          ? `adds ${fmtBytes(probe.trigramBytes ?? 0)} — bigger than the data!`
-          : `adds ${fmtBytes(probe.trigramBytes ?? 0)}`;
-      }
-      const label = row.operator === "endsWith" ? "ends with" : "contains";
-      const plain = `  ${box} ${pad(row.field, 18)} ${pad(label, 10)} ${dim(costText)}`;
-      lines.push(renderRow(plain, { cursor: idx === state.cursor, danger }));
-    });
-  }
-  lines.push("", ...estimateAxes(estimate.costs).extraIndexes);
-  lines.push("", dim("  [↑/↓] move  [space] toggle  [type] filter  [←/→] change step"));
-  return lines;
+  const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
+  const noMatchLine = allRows.length === 0 ? [dim("  no indexed text fields yet — go back and index one first")] : [];
+  const footer = ["", ...estimateAxes(estimate.costs).extraIndexes, "", dim("  [↑/↓] move  [space] toggle  [type] filter  [←/→] change step")];
+  const chromeLines = header.length + filterLine.length + noMatchLine.length + footer.length;
+
+  const { items, offset } = windowed(allRows, state.cursor, visibleRowsFor(terminalRows, chromeLines));
+  const rows = items.map((row, i) => {
+    const idx = offset + i;
+    const on = row.operator === "endsWith" ? state.endsWithFields.has(row.field) : state.containsFields.has(row.field);
+    const box = on ? color(ANSI.green, "[x]") : dim("[ ]");
+    let costText: string;
+    let danger = false;
+    if (row.operator === "endsWith") {
+      const probe = estimate.probeIndex(row.field, { endsWith: true });
+      costText = `adds ${fmtBytes(probe.reversedBytes ?? 0)}`;
+    } else {
+      const probe = estimate.probeIndex(row.field, { contains: true });
+      danger = probe.containsExceedsColumn === true;
+      costText = danger
+        ? `adds ${fmtBytes(probe.trigramBytes ?? 0)} — bigger than the data!`
+        : `adds ${fmtBytes(probe.trigramBytes ?? 0)}`;
+    }
+    const label = row.operator === "endsWith" ? "ends with" : "contains";
+    const plain = `  ${box} ${pad(row.field, 18)} ${pad(label, 10)} ${dim(costText)}`;
+    return renderRow(plain, { cursor: idx === state.cursor, danger });
+  });
+
+  return [...header, ...filterLine, ...rows, ...noMatchLine, ...footer];
 }
 
 function renderFileSize(state: WizardState, estimate: WizardEstimate): string[] {
@@ -623,8 +684,17 @@ function renderReview(state: WizardState, estimate: WizardEstimate, configPrevie
 /**
  * The whole rendered frame for one keystroke — `wizard-tui.ts` clears the screen and writes this
  * each time. `configPreview`, if given, is only used on the review stage (see `renderReview`).
+ * `terminalRows`, if given, sizes each step's scrollable list to fill the real terminal height
+ * (ADR-0006 §5) instead of a fixed page size — falls back to `DEFAULT_TERMINAL_ROWS` when omitted
+ * (not a TTY, or under test).
  */
-export function renderFrame(data: WizardData, state: WizardState, estimate: WizardEstimate, configPreview?: string): string {
+export function renderFrame(
+  data: WizardData,
+  state: WizardState,
+  estimate: WizardEstimate,
+  configPreview?: string,
+  terminalRows?: number,
+): string {
   const crumbs = STAGE_LABELS.map((label, i) =>
     i === state.stage ? color(ANSI.inverse, ` ${i + 1} ${label} `) : dim(` ${i + 1} ${label} `),
   ).join(dim("→"));
@@ -636,13 +706,13 @@ export function renderFrame(data: WizardData, state: WizardState, estimate: Wiza
       body = renderDetect(data);
       break;
     case 1:
-      body = renderSortField(data, state, estimate);
+      body = renderSortField(data, state, estimate, terminalRows);
       break;
     case 2:
-      body = renderFilterFields(data, state, estimate);
+      body = renderFilterFields(data, state, estimate, terminalRows);
       break;
     case 3:
-      body = renderTextSearch(data, state, estimate);
+      body = renderTextSearch(data, state, estimate, terminalRows);
       break;
     case 4:
       body = renderFileSize(state, estimate);

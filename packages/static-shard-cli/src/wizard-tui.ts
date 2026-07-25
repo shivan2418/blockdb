@@ -1,7 +1,7 @@
 import readline from "node:readline";
 import path from "node:path";
-import { init, resolveInitConfig, sampleRecords, type InitOptions, type InitResult } from "./init.js";
-import { readInputRecords } from "./input.js";
+import { DEFAULT_SAMPLE_SIZE, init, resolveInitConfig, sampleRecords, type InitOptions, type InitResult } from "./init.js";
+import { countInputRecords, readInputRecords, type PopulationStats } from "./input.js";
 import {
   applyKey,
   buildWizardData,
@@ -44,6 +44,9 @@ export function ensureInteractiveTTY(stdin: Pick<NodeJS.ReadStream, "isTTY">): v
 
 function keyFromInput(str: string | undefined, key: readline.Key): WizardKey | undefined {
   if (key?.ctrl && key.name === "c") return { type: "cancel" };
+  // Filter-fields step only (ADR-0006 §5 follow-up): ctrl+a/tab, not a bare letter, since bare
+  // printable characters are already claimed by type-to-filter — a plain "a" must stay text input.
+  if (key?.ctrl && key.name === "a") return { type: "select-all" };
   switch (key?.name) {
     case "up":
       return { type: "up" };
@@ -59,6 +62,8 @@ function keyFromInput(str: string | undefined, key: readline.Key): WizardKey | u
       return { type: "backspace" };
     case "space":
       return { type: "space" };
+    case "tab":
+      return { type: "invert" };
   }
   if (str && str.length === 1 && str >= " " && str !== "\x7f") return { type: "char", value: str };
   return undefined;
@@ -113,14 +118,20 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
   const format: InputFormat = opts.format ?? "ndjson";
   const delimiter = opts.delimiter ?? (format === "tsv" ? "\t" : ",");
 
-  const allRecords = readInputRecords(path.resolve(opts.cwd, inputPath), {
-    format,
-    delimiter,
-    recordsPath: opts.records,
-    fields: {},
+  const resolvedInput = path.resolve(opts.cwd, inputPath);
+  const readOpts = { format, delimiter, recordsPath: opts.records, fields: {} };
+  const allRecords = readInputRecords(resolvedInput, {
+    ...readOpts,
+    // Sampled inference only needs the leading records; a full scan reads everything.
+    limit: opts.fullScan ? undefined : (opts.sampleSize ?? DEFAULT_SAMPLE_SIZE),
   });
   const sample = sampleRecords(allRecords, opts);
-  const data: WizardData = buildWizardData(sample);
+  // With a full scan the sample IS the whole dataset; otherwise count the true totals cheaply
+  // (NDJSON streamed, no parse) so the review screen and size estimates reflect the full input.
+  const population: PopulationStats = opts.fullScan
+    ? { recordCount: allRecords.length, datasetBytes: allRecords.reduce((s, r) => s + Buffer.byteLength(JSON.stringify(r), "utf8"), 0) }
+    : countInputRecords(resolvedInput, readOpts);
+  const data: WizardData = buildWizardData(sample, population);
 
   let state: WizardState = createInitialState(data);
 
@@ -131,6 +142,7 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
       stdin.off("keypress", onKeypress);
       stdin.setRawMode?.(wasRaw ?? false);
       stdin.pause();
+      stdout.off("resize", render);
     }
 
     function render(): void {
@@ -144,7 +156,10 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
           configPreview = `(preview unavailable: ${err instanceof Error ? err.message : String(err)})`;
         }
       }
-      stdout.write(CLEAR_SCREEN + renderFrame(data, state, estimate, configPreview));
+      // Real terminal height, so each step's scrollable list fills the actual screen (ADR-0006 §5)
+      // rather than a fixed page size — `stdout.rows` is undefined for a non-TTY stream, in which
+      // case `renderFrame` falls back to its own default.
+      stdout.write(CLEAR_SCREEN + renderFrame(data, state, estimate, configPreview, stdout.rows));
     }
 
     function onKeypress(str: string | undefined, key: readline.Key): void {
@@ -172,6 +187,9 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
     readline.emitKeypressEvents(stdin);
     stdin.setRawMode?.(true);
     stdin.on("keypress", onKeypress);
+    // Re-layout (not just redraw) on terminal resize, since the list windows are now sized to fit
+    // the reported height — a resize can change how many rows are visible.
+    stdout.on("resize", render);
     render();
   });
 }

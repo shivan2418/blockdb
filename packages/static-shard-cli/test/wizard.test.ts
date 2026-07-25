@@ -145,6 +145,67 @@ describe("applyKey — filter fields step", () => {
       expect(s.indexedFields.has(state.sortField)).toBe(false);
     }
   });
+
+  test("select-all indexes every currently-visible candidate, leaving already-indexed fields' endsWith/contains untouched", () => {
+    const data = buildWizardData(PRODUCTS);
+    let state = toStage2(data);
+    state = { ...state, indexedFields: new Set(["category"]), containsFields: new Set(["category"]) };
+    state = applyKey(data, state, { type: "select-all" });
+    const visible = data.fields.filter((f) => f.name !== state.sortField).map((f) => f.name);
+    for (const name of visible) expect(state.indexedFields.has(name)).toBe(true);
+    expect(state.containsFields.has("category")).toBe(true); // untouched, not cleared by select-all
+  });
+
+  test("select-all only affects fields matching the active type-to-filter query", () => {
+    const data = buildWizardData(PRODUCTS);
+    let state = toStage2(data);
+    state = applyKey(data, state, { type: "char", value: "o" }); // "category", "novel"-ish... narrow to matches
+    state = applyKey(data, state, { type: "select-all" });
+    const matching = data.fields.filter((f) => f.name !== state.sortField && f.name.includes("o")).map((f) => f.name);
+    const nonMatching = data.fields.filter((f) => f.name !== state.sortField && !f.name.includes("o")).map((f) => f.name);
+    expect(matching.length).toBeGreaterThan(0);
+    for (const name of matching) expect(state.indexedFields.has(name)).toBe(true);
+    for (const name of nonMatching) expect(state.indexedFields.has(name)).toBe(false);
+  });
+
+  test("invert flips every currently-visible candidate's indexed membership, clearing endsWith/contains for any turned off", () => {
+    const data = buildWizardData(PRODUCTS);
+    let state = toStage2(data);
+    const visible = data.fields.filter((f) => f.name !== state.sortField).map((f) => f.name);
+    const before = new Set(state.indexedFields);
+    state = { ...state, endsWithFields: new Set(before.has("category") ? ["category"] : []) };
+    state = applyKey(data, state, { type: "invert" });
+    for (const name of visible) expect(state.indexedFields.has(name)).toBe(!before.has(name));
+    if (before.has("category")) expect(state.endsWithFields.has("category")).toBe(false);
+
+    // inverting twice returns to the original selection
+    state = applyKey(data, state, { type: "invert" });
+    expect([...state.indexedFields].sort()).toEqual([...before].sort());
+  });
+
+  test("the list fills the reported terminal height instead of a fixed page size", () => {
+    const wideRecord: Record<string, unknown> = { price: 1 };
+    for (let i = 0; i < 40; i++) wideRecord[`field${i}`] = i;
+    const data = buildWizardData([wideRecord, { ...wideRecord, price: 2 }, { ...wideRecord, price: 3 }]);
+    const state = toStage2(data);
+    const estimate = estimateForState(data, state);
+
+    const checklistRowCount = (terminalRows: number) => {
+      const rendered = renderFrame(data, state, estimate, undefined, terminalRows);
+      return rendered.split("\n").filter((l) => l.includes("[x]") || l.includes("[ ]")).length;
+    };
+
+    const shortScreen = checklistRowCount(20);
+    const tallScreen = checklistRowCount(60);
+    expect(tallScreen).toBeGreaterThan(shortScreen);
+    expect(shortScreen).toBeGreaterThanOrEqual(3); // never below the MIN_VISIBLE_ROWS floor
+    expect(tallScreen).toBeLessThan(41); // still windowed, not the whole 41-candidate list at once
+
+    // omitting terminalRows falls back to DEFAULT_TERMINAL_ROWS (24) rather than an unbounded list.
+    const rendered = renderFrame(data, state, estimate);
+    const defaultScreen = rendered.split("\n").filter((l) => l.includes("[x]") || l.includes("[ ]")).length;
+    expect(defaultScreen).toBe(checklistRowCount(24));
+  });
 });
 
 describe("applyKey — text search step", () => {
