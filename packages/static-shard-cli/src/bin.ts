@@ -6,6 +6,7 @@ import { init } from "./init.js";
 import { inspect } from "./inspect.js";
 import { runInteractiveInit } from "./wizard-tui.js";
 import { COMMAND_HELP, TOP_LEVEL_HELP, isHelpFlag, isVersionFlag } from "./help.js";
+import { createProgressReporter, formatBytes } from "./progress.js";
 import { getGeneratorVersion } from "./version.js";
 import type { InitOptions, InitResult } from "./init.js";
 import type { InspectReport } from "./inspect.js";
@@ -21,7 +22,14 @@ function runBuild(rest: string[]): void {
 
   const resolvedConfigPath = path.resolve(process.cwd(), configPath);
   const config = loadConfigFile(resolvedConfigPath);
-  const result = build(config, { baseDir: path.dirname(resolvedConfigPath) });
+  const progress = createProgressReporter(process.stdout);
+  let result;
+  try {
+    result = build(config, { baseDir: path.dirname(resolvedConfigPath), onProgress: progress.report });
+  } finally {
+    // Also on the throw path — a half-drawn bar left behind would swallow the error message.
+    progress.finish();
+  }
 
   console.log(
     `static-shard: built ${result.manifest.dataset.shardCount} shard(s), ` +
@@ -153,22 +161,30 @@ async function runInit(rest: string[]): Promise<void> {
   const { configPath, options } = parseInitArgs(rest);
   const resolvedConfigPath = path.resolve(process.cwd(), configPath);
 
-  const result: InitResult =
-    !options.yes && process.stdin.isTTY
+  const interactive = !options.yes && process.stdin.isTTY;
+  // The wizard owns the whole screen, so a progress bar underneath it would fight its rendering —
+  // only the headless path reports. A full scan is the read worth watching.
+  const progress = interactive ? undefined : createProgressReporter(process.stdout);
+
+  let result: InitResult;
+  try {
+    result = interactive
       ? await runInteractiveInit({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options })
-      : init({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options });
+      : init({
+          cwd: process.cwd(),
+          configPath: resolvedConfigPath,
+          ...options,
+          ...(progress ? { onProgress: progress.report } : {}),
+        });
+  } finally {
+    progress?.finish();
+  }
 
   for (const warning of result.warnings) console.warn(warning);
   console.log(
     `static-shard: wrote ${result.configPath}` +
       (result.reinferred ? " (schema inferred)" : " (schema unchanged — pass --reinfer to refresh)"),
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${Math.round(bytes)}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function printInspectReport(report: InspectReport): void {

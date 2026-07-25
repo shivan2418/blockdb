@@ -18,6 +18,7 @@ import {
 import { cutIntoShards, materializeShards, shardRelPath } from "./shard.js";
 import type { ShardFile } from "./shard.js";
 import { externalSort, type SortKind } from "./sort.js";
+import type { OnProgress } from "./progress.js";
 import type { BuiltIndexChunk } from "./secondary-index.js";
 import type { IndexChunkDirEntry, Manifest, PairZonemapEntry, ResolvedConfig, StaticShardConfig } from "./types.js";
 import { getFormatVersion, getGeneratorVersion } from "./version.js";
@@ -34,6 +35,8 @@ export interface MaterializeOptions {
   sortRunRecords?: number;
   /** Scratch directory the external sort may use when spilling. Default `os.tmpdir()`. */
   tmpDir?: string;
+  /** Phase-level progress for long builds. Purely observational — never changes what's produced. */
+  onProgress?: OnProgress;
 }
 
 export interface MaterializeResult {
@@ -62,8 +65,14 @@ export function materialize(
   const generatorVersion = opts.generatorVersion ?? getGeneratorVersion();
   const formatVersion = opts.formatVersion ?? getFormatVersion();
   const sortKind = resolved.fields[resolved.sortField]!.kind as SortKind;
+  const progress = opts.onProgress;
 
+  progress?.({ phase: "checking schema", done: records.length, total: records.length, unit: "count" });
   assertNoSchemaDrift(records, resolved.fields);
+
+  // The sort has no reportable midpoint (it's one call that may spill runs to disk), so it's an
+  // open-ended phase carrying the record count rather than a fake percentage.
+  progress?.({ phase: `sorting by ${resolved.sortField}`, done: records.length, unit: "count" });
   const sorted = externalSort(records, {
     sortField: resolved.sortField,
     kind: sortKind,
@@ -72,6 +81,7 @@ export function materialize(
     tmpDir: opts.tmpDir ?? os.tmpdir(),
   });
 
+  progress?.({ phase: "splitting into data files" });
   const groups = cutIntoShards(sorted, resolved.sortField, resolved.shardBytes);
   const shardFiles = materializeShards(groups);
   const splitPoints = computeSplitPoints(groups, resolved.sortField);
@@ -96,7 +106,17 @@ export function materialize(
       return { from, to, file: relPath };
     });
 
+  let fieldsIndexed = 0;
   for (const [name, field] of indexedSecondaryFields) {
+    // Per-field rather than a single "indexing" phase: index building dominates a big build, and
+    // which field it's chewing on is the useful detail (a `contains` trigram field is the slow one).
+    progress?.({
+      phase: `indexing ${name}`,
+      done: fieldsIndexed,
+      total: indexedSecondaryFields.length,
+      unit: "count",
+    });
+    fieldsIndexed++;
     const multi = field.multi === true;
     secondaryZonemaps[name] = computeSecondaryZonemap(groups, name, field.kind, multi);
     indexChunkDirs[name] = addIndexChunks(
@@ -129,6 +149,12 @@ export function materialize(
     }
   }
 
+  progress?.({
+    phase: "building manifest",
+    done: indexedSecondaryFields.length,
+    total: indexedSecondaryFields.length,
+    unit: "count",
+  });
   const rawManifest = buildManifest({
     config: resolved,
     shardFiles,
@@ -172,6 +198,8 @@ export interface BuildOptions {
   sortRunRecords?: number;
   /** Scratch directory the external sort may use when spilling. Default `os.tmpdir()`. */
   tmpDir?: string;
+  /** Phase-level progress for long builds. Purely observational — never changes what's produced. */
+  onProgress?: OnProgress;
 }
 
 export interface BuildResult {
@@ -192,11 +220,14 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
   const generatorVersion = opts.generatorVersion ?? getGeneratorVersion();
   const formatVersion = opts.formatVersion ?? getFormatVersion();
 
+  const progress = opts.onProgress;
+
   const records = readInputRecords(resolved.inputPath, {
     format: resolved.inputFormat,
     delimiter: resolved.inputDelimiter,
     recordsPath: resolved.inputRecordsPath,
     fields: resolved.fields,
+    ...(progress ? { onProgress: progress } : {}),
   });
 
   const { manifest, shardFiles, indexFiles, warnings } = materialize(resolved, records, {
@@ -204,10 +235,12 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
     formatVersion,
     sortRunRecords: opts.sortRunRecords,
     tmpDir: opts.tmpDir,
+    ...(progress ? { onProgress: progress } : {}),
   });
 
   rmSync(resolved.output, { recursive: true, force: true });
   mkdirSync(resolved.output, { recursive: true });
+  let shardsWritten = 0;
   for (const file of shardFiles) {
     const filePath = path.join(resolved.output, shardRelPath(file.hash, shardFiles.length, resolved.gzip));
     mkdirSync(path.dirname(filePath), { recursive: true });
@@ -215,14 +248,18 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
     // in `shard.ts`) stays over the LOGICAL uncompressed NDJSON, so toggling gzip between rebuilds
     // never perturbs shard hashes or the manifest/index structures keyed on them.
     writeFileSync(filePath, resolved.gzip ? gzipSync(file.content) : file.content);
+    progress?.({ phase: "writing data files", done: ++shardsWritten, total: shardFiles.length, unit: "count" });
   }
+  let indexFilesWritten = 0;
   for (const { relPath, content } of indexFiles) {
     const filePath = path.join(resolved.output, relPath);
     mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileSync(filePath, content);
+    progress?.({ phase: "writing index files", done: ++indexFilesWritten, total: indexFiles.length, unit: "count" });
   }
   writeFileSync(path.join(resolved.output, "manifest.json"), JSON.stringify(manifest, null, 2));
 
+  progress?.({ phase: "generating client", done: 1, total: 1, unit: "count" });
   mkdirSync(resolved.clientOut, { recursive: true });
   writeFileSync(path.join(resolved.clientOut, "schema.ts"), generateSchemaTs(manifest, generatorVersion));
   writeFileSync(

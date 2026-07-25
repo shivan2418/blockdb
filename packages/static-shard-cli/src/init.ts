@@ -3,6 +3,7 @@ import path from "node:path";
 import { loadConfigFile, resolveConfig } from "./config.js";
 import { inferSchema } from "./infer.js";
 import { readInputRecords } from "./input.js";
+import type { OnProgress } from "./progress.js";
 import type { FieldConfig, InputFormat, StaticShardConfig } from "./types.js";
 import { getFormatVersion } from "./version.js";
 
@@ -53,6 +54,11 @@ export interface InitOptions {
   basePath?: string;
   shardBytes?: number;
   indexChunkBytes?: number;
+  /**
+   * Progress for the read phase. Worth wiring for `--full-scan`, which reads the entire input
+   * rather than a bounded leading sample and is otherwise a long silence.
+   */
+  onProgress?: OnProgress;
 }
 
 type FieldFlagOverrides = Pick<InitOptions, "indexedFields" | "endsWithFields" | "containsFields">;
@@ -207,6 +213,7 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       fields: {},
       // Sampled inference only needs the leading records; a full scan reads everything.
       limit: opts.fullScan ? undefined : (opts.sampleSize ?? DEFAULT_SAMPLE_SIZE),
+      ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     });
     if (allRecords.length === 0) {
       throw new Error(`static-shard: init found no records in "${inputPath}" to infer a schema from`);
