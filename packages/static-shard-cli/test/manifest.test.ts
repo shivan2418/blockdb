@@ -166,7 +166,7 @@ describe("buildManifest", () => {
     expect(manifest.zonemap.year).toEqual({ splitPoints: [2000, 2005] });
   });
 
-  test("an opted-in secondary number field gets only equals/in (no gt/lt — that's zonemap territory, out of T3 scope)", () => {
+  test("an opted-in secondary number field gets the range operators, pruned by its [min,max] pairs", () => {
     const indexedConfig: ResolvedConfig = {
       ...config,
       fields: { ...config.fields, rating: { kind: "number", indexed: true } },
@@ -182,8 +182,44 @@ describe("buildManifest", () => {
       kind: "number",
       isDate: false,
       indexed: true,
-      operators: ["equals", "in", "not"],
+      operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"],
     });
+  });
+
+  test("a secondary date field gets ranges too — ISO-8601 pairs are stored untruncated, so they compare chronologically", () => {
+    const indexedConfig: ResolvedConfig = {
+      ...config,
+      fields: { ...config.fields, released: { kind: "date", indexed: true } },
+    };
+    const manifest = buildManifest({
+      config: indexedConfig,
+      shardFiles,
+      splitPoints,
+      formatVersion: 0,
+      generatorVersion: "0.0.0",
+    });
+    expect(manifest.schema.fields.released!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not"]);
+  });
+
+  test("a secondary STRING field is deliberately denied ranges — string comparison is lexicographic", () => {
+    // Measured on real card data: `power` is a string because 1.6% of values are "*", "1+*", "∞".
+    // A lexicographic `gte: "2"` silently drops every double-digit power ("10" < "2"), which is a
+    // confidently wrong answer rather than a missing feature. Only the SORT field gets string ranges,
+    // where the ordering is the physical one the user chose.
+    const indexedConfig: ResolvedConfig = {
+      ...config,
+      fields: { ...config.fields, title: { kind: "string", indexed: true } },
+    };
+    const manifest = buildManifest({
+      config: indexedConfig,
+      shardFiles,
+      splitPoints,
+      formatVersion: 0,
+      generatorVersion: "0.0.0",
+    });
+    const ops = manifest.schema.fields.title!.operators;
+    expect(ops).toEqual(["equals", "in", "startsWith", "not"]);
+    for (const rangeOp of ["gt", "gte", "lt", "lte"]) expect(ops).not.toContain(rangeOp);
   });
 
   test("T6: endsWith opt-in appends the operator and merges the reversed chunk directory", () => {

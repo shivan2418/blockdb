@@ -106,10 +106,17 @@ export function candidateShardIndices(
   return range(startIdx, endIdx);
 }
 
-/** A secondary field's equals/in constraint — the only shapes a per-shard [min,max] pair can weakly prune (ADR-0003 §6 step 1). */
+/**
+ * A secondary field's constraint, in the shapes a per-shard [min,max] pair can prune (ADR-0003 §6
+ * step 1): point lookups (`equals`/`in`) and ranges (`gt`/`gte`/`lt`/`lte`).
+ */
 export interface PairRangeFilter {
   equals?: unknown;
   in?: unknown[];
+  gt?: unknown;
+  gte?: unknown;
+  lt?: unknown;
+  lte?: unknown;
 }
 
 function withinPair(pair: readonly [unknown, unknown], value: unknown): boolean {
@@ -117,6 +124,28 @@ function withinPair(pair: readonly [unknown, unknown], value: unknown): boolean 
   // A shard with zero non-null values for this field has no bound to compare against (ADR-0002 §5/T7).
   if (min === undefined || max === undefined) return false;
   return (min as never) <= (value as never) && (value as never) <= (max as never);
+}
+
+function hasRangeBound(filter: PairRangeFilter): boolean {
+  return filter.gt !== undefined || filter.gte !== undefined || filter.lt !== undefined || filter.lte !== undefined;
+}
+
+/**
+ * Whether a shard's [min,max] overlaps the filter's range — the only question a pair can answer
+ * about a range. A shard survives unless its whole span sits on one side of a bound.
+ *
+ * `gt`/`lt` differ from `gte`/`lte` only at the boundary: a shard whose max is exactly the bound can
+ * satisfy `gte` but not `gt`. Since number/date pairs are exact (only string pairs are truncated —
+ * ADR-0003 §2), that distinction is sound rather than merely conservative.
+ */
+function overlapsRange(pair: readonly [unknown, unknown], filter: PairRangeFilter): boolean {
+  const [min, max] = pair;
+  if (min === undefined || max === undefined) return false;
+  if (filter.gte !== undefined && (max as never) < (filter.gte as never)) return false;
+  if (filter.gt !== undefined && (max as never) <= (filter.gt as never)) return false;
+  if (filter.lte !== undefined && (min as never) > (filter.lte as never)) return false;
+  if (filter.lt !== undefined && (min as never) >= (filter.lt as never)) return false;
+  return true;
 }
 
 /**
@@ -131,12 +160,18 @@ export function pairCandidateShardIndices(
   pairs: readonly (readonly [unknown, unknown])[],
   filter: PairRangeFilter,
 ): Set<number> | undefined {
-  if (filter.equals === undefined && filter.in === undefined) return undefined;
+  const hasPoint = filter.equals !== undefined || filter.in !== undefined;
+  const hasRange = hasRangeBound(filter);
+  if (!hasPoint && !hasRange) return undefined;
 
-  const indices = new Set<number>();
+  // Point and range constraints on one field are ANDed, matching `matchesWhere`: `{ equals: 5, gte: 10 }`
+  // is unsatisfiable and must prune to nothing, not to the union of what each shape would admit.
   const values = filter.in ?? [filter.equals];
+  const indices = new Set<number>();
   pairs.forEach((pair, i) => {
-    if (values.some((value) => withinPair(pair, value))) indices.add(i);
+    if (hasPoint && !values.some((value) => withinPair(pair, value))) return;
+    if (hasRange && !overlapsRange(pair, filter)) return;
+    indices.add(i);
   });
   return indices;
 }

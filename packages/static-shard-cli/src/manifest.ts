@@ -17,10 +17,17 @@ const SORT_FIELD_OPERATORS = ["equals", "in", "gt", "gte", "lt", "lte"] as const
 /** Secondary string fields: values are sorted in the index, so prefix = a contiguous range (ADR-0003 §7). */
 const SECONDARY_STRING_OPERATORS = ["equals", "in", "startsWith"] as const;
 /**
- * Secondary number/date fields: their zonemap overlaps (can't pinpoint a value), so `equals`/`in` need the
- * inverted index; `gt`/`lt` would need the (already-present) zonemap pairs but that's out of T3's scope.
+ * Secondary number/date fields. `equals`/`in` are resolved exactly via the inverted index; the range
+ * operators are pruned by the per-shard `[min,max]` pairs the zonemap already carries (ADR-0003 §6),
+ * keeping only shards whose span overlaps the query interval. Those pairs are stored untruncated for
+ * number/date — only string pairs are truncated — so range pruning is exact at shard granularity.
+ *
+ * Ranges are NOT offered on secondary STRING fields, deliberately: string comparison is lexicographic,
+ * so `gte: "2"` on a numeric-looking column drops every double-digit value. Only the sort field gets
+ * string ranges, where the ordering is the physical one the user chose (and `startsWith` covers the
+ * prefix case a sorted string column can actually answer).
  */
-const SECONDARY_RANGE_KIND_OPERATORS = ["equals", "in"] as const;
+const SECONDARY_RANGE_KIND_OPERATORS = ["equals", "in", "gt", "gte", "lt", "lte"] as const;
 const SECONDARY_BOOLEAN_OPERATORS = ["equals"] as const;
 /** `not` needs no index structure of its own — it's a filter-only rider valid alongside any pruning op (T7/ADR-0004). */
 const RIDER_OPERATOR = "not";

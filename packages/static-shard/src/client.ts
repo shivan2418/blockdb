@@ -22,7 +22,13 @@ import {
   type GenericClient,
   type SchemaMeta,
 } from "./types.js";
-import { candidateShardIndices, pairCandidateShardIndices, type SortFieldFilter, type SortValue } from "./zonemap.js";
+import {
+  candidateShardIndices,
+  pairCandidateShardIndices,
+  type PairRangeFilter,
+  type SortFieldFilter,
+  type SortValue,
+} from "./zonemap.js";
 import { fetchZonemapSidecar } from "./zonemap-fetch.js";
 
 interface RawFindManyArgs {
@@ -37,6 +43,19 @@ function secondaryFilterOf(rawFilter: Record<string, unknown>): SecondaryFieldFi
   const { equals, in: inValues, startsWith } = rawFilter;
   if (equals === undefined && inValues === undefined && startsWith === undefined) return undefined;
   return { equals, in: inValues as unknown[] | undefined, startsWith: startsWith as string | undefined };
+}
+
+/**
+ * The part of a filter a per-shard [min,max] pair can prune: point lookups plus ranges. Ranges are
+ * zonemap-only — the inverted index is a dictionary of exact values, and a range has no key to look
+ * up — so they are extracted separately from `secondaryFilterOf` rather than widening it.
+ */
+function pairFilterOf(rawFilter: Record<string, unknown>): PairRangeFilter | undefined {
+  const { equals, in: inValues, gt, gte, lt, lte } = rawFilter;
+  if (equals === undefined && inValues === undefined && gt === undefined && gte === undefined && lt === undefined && lte === undefined) {
+    return undefined;
+  }
+  return { equals, in: inValues as unknown[] | undefined, gt, gte, lt, lte };
 }
 
 /**
@@ -186,16 +205,22 @@ async function secondaryFieldCandidates(
   const { endsWith, contains } = effectiveFilter as { endsWith?: string; contains?: string };
   const sets: Set<number>[] = [];
 
+  // ADR-0003 §6 step 1: free zonemap pruning before the pay-on-use index-chunk fetch. The zonemap can
+  // only over-approximate (never wrongly excludes a real match — ADR-0003 §2), so intersecting it in
+  // never changes the final (already-exact) index result; it's how a secondary field's zonemap —
+  // inline or a lazily-fetched sidecar (T13, ADR-0003 §3) — gets exercised at all, since equals/in are
+  // otherwise resolved exactly via the index alone. For a RANGE it is the only pruning available, and
+  // the pairs are exact for number/date (only string pairs are truncated), so it prunes precisely.
+  const pairFilter = pairFilterOf(effectiveFilter);
+  if (pairFilter) {
+    const zonemap = await resolveSecondaryZonemap(manifest, ctx, field);
+    const zonemapSet = zonemap && pairCandidateShardIndices(zonemap.pairs, pairFilter);
+    if (zonemapSet) sets.push(zonemapSet);
+  }
+
+  // Step 2: the inverted index, for the shapes that have a dictionary key to look up.
   const baseFilter = secondaryFilterOf(effectiveFilter);
   if (baseFilter) {
-    // ADR-0003 §6 step 1: free zonemap pruning before the pay-on-use index-chunk fetch. The
-    // zonemap can only over-approximate (never wrongly excludes a real match — ADR-0003 §2), so
-    // intersecting it in never changes the final (already-exact) index result; it's how a
-    // secondary field's zonemap — inline or a lazily-fetched sidecar (T13, ADR-0003 §3) — gets
-    // exercised at all, since equals/in are otherwise resolved exactly via the index alone.
-    const zonemap = await resolveSecondaryZonemap(manifest, ctx, field);
-    const zonemapSet = zonemap && pairCandidateShardIndices(zonemap.pairs, baseFilter);
-    if (zonemapSet) sets.push(zonemapSet);
     sets.push(await candidatesFromChunkedIndex(ctx, indexDescriptor.chunks, kind, baseFilter));
   }
 

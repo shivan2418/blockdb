@@ -344,10 +344,12 @@ describe("seam #1 — secondary inverted index & zonemap (T3)", () => {
     expect(expectedTitles[expectedTitles.length - 1]! <= (chunks[chunks.length - 1]!.to as string)).toBe(true);
   });
 
-  test("secondary number field gets equals/in only, and its own chunk directory", () => {
+  test("secondary number field gets equals/in plus the range operators, and its own chunk directory", () => {
     const { manifest } = build(indexedConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
-    expect(manifest.schema.fields.rating!.operators).toEqual(["equals", "in", "not"]);
+    expect(manifest.schema.fields.rating!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not"]);
     expect(manifest.indexes.rating!.chunks.length).toBeGreaterThan(0);
+    // The ranges are answered off the untruncated pairs below, not off these chunks.
+    expect(manifest.zonemap.rating).toHaveProperty("pairs");
   });
 
   test("secondary zonemap pairs are present and ordinal-aligned with shards[], string pairs marked truncated", () => {
@@ -635,6 +637,49 @@ async function invalid() {
   // contains was never opted in for title — disabled operator.
   // @ts-expect-error
   await db.movies.findMany({ where: { title: { contains: "lad" } } });
+}
+
+void valid;
+void invalid;
+`;
+    assertConsumerCompiles(clientOutDir, consumerSource);
+  });
+
+  test("range operators are offered on a secondary NUMBER field and withheld from a secondary STRING field", () => {
+    // indexedConfig indexes `title` (string) and `rating` (number); `year` is the sort field.
+    const rangeConfig: StaticShardConfig = {
+      ...indexedConfig,
+      schema: {
+        ...indexedConfig.schema,
+        fields: { ...indexedConfig.schema.fields, rating: { kind: "number", indexed: true } },
+      },
+    };
+    const { clientOutDir } = build(rangeConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+
+    const consumerSource = `
+import { connect } from "./client.js";
+
+const db = connect();
+
+async function valid() {
+  // rating is a secondary number field — ranges are pruned by its [min,max] zonemap pairs.
+  await db.movies.findMany({ where: { rating: { gte: 8.5 } } });
+  await db.movies.findMany({ where: { rating: { gt: 8.0, lte: 9.0 } } });
+  // composes with a range on the sort field.
+  await db.movies.findMany({ where: { year: { gte: 2000 }, rating: { lt: 8.5 } } });
+}
+
+async function invalid() {
+  // title is a secondary STRING field: lexicographic ranges are a footgun, so they stay off.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { title: { gte: "M" } } });
+
+  // @ts-expect-error
+  await db.movies.findMany({ where: { title: { lt: "M" } } });
+
+  // still type-checked against the field's kind.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { rating: { gte: "8.5" } } });
 }
 
 void valid;

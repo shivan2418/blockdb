@@ -322,6 +322,65 @@ describe("seam #2 — count() approximate upper bound & pagination totals (T4), 
   });
 });
 
+describe("seam #2 — range operators on a secondary number/date field (ADR-0003 §6)", () => {
+  test("gte/lte on a non-sort number field return exactly the matching records", async () => {
+    const { outputDir, clientOutDir } = build(indexedConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
+      basePath: outputDir,
+      fetch: diskFetchBinary([]),
+    });
+
+    // rating is indexed but is NOT the sort field (year is) — today this shape is unqueryable.
+    const cases = [
+      { filter: { gte: 8.6 }, truth: MOVIES.filter((m) => m.rating >= 8.6) },
+      { filter: { lt: 8.4 }, truth: MOVIES.filter((m) => m.rating < 8.4) },
+      { filter: { gt: 8.3, lte: 8.6 }, truth: MOVIES.filter((m) => m.rating > 8.3 && m.rating <= 8.6) },
+    ] as const;
+
+    for (const { filter, truth } of cases) {
+      const result = await client.movies.findMany({ where: { rating: filter } });
+      expect(result.records.map((r) => r.title).sort()).toEqual(truth.map((m) => m.title).sort());
+    }
+  });
+
+  test("the zonemap prunes a range to the shards that overlap it, rather than reading every shard", async () => {
+    const { outputDir, clientOutDir, manifest } = build(indexedConfig, {
+      baseDir: tmpDir,
+      generatorVersion: "0.1.0",
+      formatVersion: 0,
+    });
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const requests: string[] = [];
+    const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
+      basePath: outputDir,
+      fetch: diskFetchBinary(requests),
+    });
+
+    // The single highest rating — only the shard holding it can overlap [9.0, ∞).
+    const result = await client.movies.findMany({ where: { rating: { gte: 9.0 } } });
+    expect(result.records.map((r) => r.title)).toEqual(["The Dark Knight"]);
+
+    const shardReads = requests.filter((r) => r.includes(`${path.sep}shards${path.sep}`));
+    expect(shardReads.length).toBeGreaterThan(0);
+    expect(shardReads.length).toBeLessThan(manifest.shards.length);
+  });
+
+  test("a range on a secondary field composes with a range on the sort field", async () => {
+    const { outputDir, clientOutDir } = build(indexedConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
+      basePath: outputDir,
+      fetch: diskFetchBinary([]),
+    });
+
+    const result = await client.movies.findMany({ where: { year: { gte: 2005 }, rating: { gte: 8.6 } } });
+    expect(result.records.map((r) => r.title).sort()).toEqual(
+      MOVIES.filter((m) => m.year >= 2005 && m.rating >= 8.6).map((m) => m.title).sort(),
+    );
+  });
+});
+
 describe("seam #2 — findMany's exact total, when the query already saw every match (refines ADR-0008 §5)", () => {
   /** All four cases run against one client — the point is which queries can report a total, not the tree. */
   async function movieClient(requests: string[]) {

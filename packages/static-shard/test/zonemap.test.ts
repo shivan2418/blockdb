@@ -123,4 +123,64 @@ describe("pairCandidateShardIndices", () => {
     ];
     expect(pairCandidateShardIndices(withGap, { equals: "Charlie" })).toEqual(new Set([0]));
   });
+
+  // Range pruning keeps a shard iff its [min,max] OVERLAPS the query interval. For number/date the
+  // pairs are exact (only string pairs are truncated), so this prunes precisely at shard granularity.
+  describe("range operators (ADR-0003 §6, secondary number/date fields)", () => {
+    // shard0 [0,8], shard1 [3,12], shard2 [20,40] — deliberately overlapping, as real data is.
+    const numeric: [number, number][] = [
+      [0, 8],
+      [3, 12],
+      [20, 40],
+    ];
+
+    test("gte keeps every shard that could still hold a value at or above the bound", () => {
+      expect(pairCandidateShardIndices(numeric, { gte: 10 })).toEqual(new Set([1, 2]));
+    });
+
+    test("lte keeps every shard reaching at or below the bound", () => {
+      expect(pairCandidateShardIndices(numeric, { lte: 2 })).toEqual(new Set([0]));
+    });
+
+    test("gt/lt exclude a shard that only touches the bound exactly", () => {
+      // shard0's max is 8, so `gt: 8` cannot be satisfied there, while `gte: 8` can.
+      expect(pairCandidateShardIndices(numeric, { gte: 8 })).toEqual(new Set([0, 1, 2]));
+      expect(pairCandidateShardIndices(numeric, { gt: 8 })).toEqual(new Set([1, 2]));
+      expect(pairCandidateShardIndices(numeric, { lt: 3 })).toEqual(new Set([0]));
+    });
+
+    test("a two-sided range intersects both bounds rather than unioning them", () => {
+      expect(pairCandidateShardIndices(numeric, { gte: 9, lte: 15 })).toEqual(new Set([1]));
+    });
+
+    test("a range no shard overlaps selects nothing", () => {
+      expect(pairCandidateShardIndices(numeric, { gte: 13, lte: 19 })).toEqual(new Set());
+    });
+
+    test("a point and a range on one field are ANDed, pruning more than either alone", () => {
+      // `in` alone would admit all three (5 is in shard0 and shard1, 25 in shard2); the range cuts it to one.
+      expect(pairCandidateShardIndices(numeric, { in: [5, 25] })).toEqual(new Set([0, 1, 2]));
+      expect(pairCandidateShardIndices(numeric, { in: [5, 25], gte: 20 })).toEqual(new Set([2]));
+    });
+
+    test("pruning reasons per-constraint, so an unsatisfiable combination may still admit a shard", () => {
+      // Nothing is both ==5 and >=10, but shard1 [3,12] could hold a 5 AND could hold something >=10.
+      // A pair cannot see that no single value does both. Over-approximating is the contract
+      // (ADR-0003 §2) — matchesWhere rejects the records post-fetch.
+      expect(pairCandidateShardIndices(numeric, { equals: 5, gte: 10 })).toEqual(new Set([1]));
+    });
+
+    test("ISO date strings compare correctly, since date pairs are stored untruncated", () => {
+      const dates: [string, string][] = [
+        ["2019-01-01", "2019-06-30"],
+        ["2020-01-01", "2020-12-31"],
+      ];
+      expect(pairCandidateShardIndices(dates, { gte: "2020-06-01" })).toEqual(new Set([1]));
+    });
+
+    test("a shard with no bound is skipped by a range too", () => {
+      const withGap: [unknown, unknown][] = [[0, 8], [undefined, undefined], [20, 40]];
+      expect(pairCandidateShardIndices(withGap, { gte: 1 })).toEqual(new Set([0, 2]));
+    });
+  });
 });
