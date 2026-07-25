@@ -1,3 +1,4 @@
+import { compressionSuffix, type Compression } from "./types.js";
 import { contentHash } from "./hash.js";
 import type { ShardDescriptor } from "./types.js";
 
@@ -12,8 +13,8 @@ const HASH_PREFIX_LEN = 2;
  * gzip extension IS recorded in the manifest (`dataset.gzip`) since a query doesn't otherwise
  * know a deploy's build-time compression choice.
  */
-export function shardRelPath(hash: string, shardCount: number, gzip = false): string {
-  const filename = gzip ? `${hash}.ndjson.gz` : `${hash}.ndjson`;
+export function shardRelPath(hash: string, shardCount: number, compression: Compression = "none"): string {
+  const filename = `${hash}.ndjson${compressionSuffix(compression)}`;
   return shardCount > HASH_PREFIX_THRESHOLD ? `shards/${hash.slice(0, HASH_PREFIX_LEN)}/${filename}` : `shards/${filename}`;
 }
 

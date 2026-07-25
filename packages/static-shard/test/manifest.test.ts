@@ -152,7 +152,7 @@ describe("fetchManifest — build-time gzipped manifest (ADR-0002 §8)", () => {
     // The manifest is the bootstrap fetch, so unlike index chunks nothing can tell the client how it
     // was encoded — the generated client carries the answer instead.
     const { impl, urls } = fakeGzipFetch("/data/manifest.json.gz", gzipSync(JSON.stringify(manifest)));
-    expect(await fetchManifest("/data", impl, true)).toEqual(manifest);
+    expect(await fetchManifest("/data", impl, "gzip")).toEqual(manifest);
     expect(urls).toEqual(["/data/manifest.json.gz"]);
   });
 
@@ -163,7 +163,7 @@ describe("fetchManifest — build-time gzipped manifest (ADR-0002 §8)", () => {
 
   test("a gzipped manifest that isn't valid gzip → CORRUPT_DATA, not a silent empty dataset", async () => {
     const { impl } = fakeGzipFetch("/data/manifest.json.gz", new TextEncoder().encode("not gzip"));
-    const error = await fetchManifest("/data", impl, true).then(
+    const error = await fetchManifest("/data", impl, "gzip").then(
       () => {
         throw new Error("expected rejection");
       },
@@ -175,7 +175,7 @@ describe("fetchManifest — build-time gzipped manifest (ADR-0002 §8)", () => {
 
   test("a missing gzipped manifest still reports CONFIG against the .gz url (ADR-0007 §6)", async () => {
     const { impl } = fakeGzipFetch("/data/elsewhere.json.gz", gzipSync("{}"));
-    const error = await fetchManifest("/data", impl, true).then(
+    const error = await fetchManifest("/data", impl, "gzip").then(
       () => {
         throw new Error("expected rejection");
       },

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync, gzipSync } from "node:zlib";
 import { materialize } from "./build.js";
 import { loadConfigFile, resolveConfig } from "./config.js";
 import {
@@ -226,14 +226,16 @@ function inspectConfig(configPath: string): InspectReport {
  * break both.
  */
 function readLogicalText(filePath: string): string {
-  return filePath.endsWith(".gz") ? gunzipSync(readFileSync(filePath)).toString("utf8") : readFileSync(filePath, "utf8");
+  if (filePath.endsWith(".gz")) return gunzipSync(readFileSync(filePath)).toString("utf8");
+  if (filePath.endsWith(".br")) return brotliDecompressSync(readFileSync(filePath)).toString("utf8");
+  return readFileSync(filePath, "utf8");
 }
 
 function inspectDir(dir: string): InspectReport {
   // A gzipped build ships `manifest.json.gz` instead — the name changes, not just the encoding.
-  const manifestPath = [path.join(dir, "manifest.json"), path.join(dir, "manifest.json.gz")].find((candidate) =>
-    existsSync(candidate),
-  );
+  const manifestPath = ["manifest.json", "manifest.json.gz", "manifest.json.br"]
+    .map((name) => path.join(dir, name))
+    .find((candidate) => existsSync(candidate));
   if (manifestPath === undefined) {
     throw new Error(`static-shard: inspect --dir "${dir}" has no manifest.json — has it been built yet?`);
   }
@@ -244,7 +246,7 @@ function inspectDir(dir: string): InspectReport {
   const columnBytesFor = (field: string, multi: boolean): number => {
     let bytes = 0;
     for (const shard of manifest.shards) {
-      const shardPath = path.join(dir, shardRelPath(shard.hash, manifest.shards.length, manifest.dataset.gzip === true));
+      const shardPath = path.join(dir, shardRelPath(shard.hash, manifest.shards.length, manifest.dataset.compression ?? "none"));
       const content = readLogicalText(shardPath);
       for (const line of content.split("\n")) {
         if (line.length === 0) continue;

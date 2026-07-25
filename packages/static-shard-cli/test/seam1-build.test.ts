@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { gunzipSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { build } from "../src/build.js";
@@ -176,7 +176,7 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
 
     // The manifest is the bootstrap fetch, so the encoding has to be baked into the client.
     const clientTs = readFileSync(path.join(clientOutDir, "client.ts"), "utf8");
-    expect(clientTs).toMatch(/manifestGzip:/);
+    expect(clientTs).toMatch(/manifestCompression:/);
 
     // ...and not baked when it doesn't apply
     const plain = build(
@@ -184,7 +184,7 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
       { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
     );
     expect(existsSync(path.join(plain.outputDir, "manifest.json"))).toBe(true);
-    expect(readFileSync(path.join(plain.clientOutDir, "client.ts"), "utf8")).not.toMatch(/manifestGzip/);
+    expect(readFileSync(path.join(plain.clientOutDir, "client.ts"), "utf8")).not.toMatch(/manifestCompression/);
   });
 
   test("a string sort field range-partitions lexicographically and prunes like any other sort field", () => {
@@ -1393,14 +1393,37 @@ describe("seam #1 — external sort scale hardening (T13)", () => {
     expect(existsSync(path.join(outputDir, "shards", firstHash.slice(0, 2), `${firstHash}.ndjson`))).toBe(true);
   });
 
-  test("optional build-time gzip writes .ndjson.gz shards, flags manifest.dataset.gzip, and preserves shard hashes (ADR-0002 §8)", () => {
+  test("compression: brotli writes .ndjson.br shards that decompress, and preserves shard hashes", () => {
+    const plain = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const br = build(
+      { ...config, output: "public/shard-data-br", compression: "brotli" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+
+    expect(br.manifest.dataset.compression).toBe("brotli");
+    // The hash is over logical, pre-compression content, so it is identical across all three encodings.
+    expect(br.manifest.shards.map((s) => s.hash)).toEqual(plain.manifest.shards.map((s) => s.hash));
+
+    const hash = br.manifest.shards[0]!.hash;
+    const onDisk = readFileSync(path.join(br.outputDir, "shards", `${hash}.ndjson.br`));
+    expect(existsSync(path.join(br.outputDir, "shards", `${hash}.ndjson`))).toBe(false);
+    expect(brotliDecompressSync(onDisk).toString("utf8")).toBe(
+      readFileSync(path.join(plain.outputDir, "shards", `${hash}.ndjson`), "utf8"),
+    );
+
+    // ...and the whole served tree is brotli, manifest and index chunks included
+    expect(existsSync(path.join(br.outputDir, "manifest.json.br"))).toBe(true);
+    for (const chunk of br.manifest.indexes.title?.chunks ?? []) expect(chunk.file).toMatch(/\.json\.br$/);
+  });
+
+  test("optional build-time gzip writes .ndjson.gz shards, flags manifest.dataset.compression, and preserves shard hashes (ADR-0002 §8)", () => {
     const gzipConfig: StaticShardConfig = { ...config, output: "public/shard-data-gz", gzip: true };
 
     const plain = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
     const gzipped = build(gzipConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 
-    expect(gzipped.manifest.dataset.gzip).toBe(true);
-    expect(plain.manifest.dataset.gzip).toBeUndefined();
+    expect(gzipped.manifest.dataset.compression).toBe("gzip");
+    expect(plain.manifest.dataset.compression).toBeUndefined();
     // toggling gzip doesn't perturb shard hashes — the hash is over logical, pre-compression content
     expect(gzipped.manifest.shards.map((s) => s.hash)).toEqual(plain.manifest.shards.map((s) => s.hash));
 

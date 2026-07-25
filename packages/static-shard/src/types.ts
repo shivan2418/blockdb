@@ -1,3 +1,23 @@
+/**
+ * How the deploy pre-compresses every file it serves (ADR-0002 §8). `"none"` is the default: most
+ * hosts apply `Content-Encoding` themselves, which negotiates per client, whereas a pre-compressed
+ * file cannot — a baked `.br` is unreadable to a client without brotli, with no fallback.
+ *
+ * Note the mismatch the file extension hides: the served suffix is `.br` (matching `Content-Encoding:
+ * br`), but the DecompressionStream format string is `"brotli"`.
+ */
+export type Compression = "none" | "gzip" | "brotli";
+
+/** The suffix a compressed file carries. Duplicated in both packages and pinned by an equivalence test — the runtime must derive shard paths without reading anything the CLI wrote. */
+export function compressionSuffix(compression: Compression): string {
+  return compression === "gzip" ? ".gz" : compression === "brotli" ? ".br" : "";
+}
+
+/** The `DecompressionStream` format name for a compression, or `undefined` when nothing was applied. */
+export function decompressionFormat(compression: Compression): "gzip" | "brotli" | undefined {
+  return compression === "none" ? undefined : compression;
+}
+
 // The dataset-agnostic runtime's type machinery (ADR-0004). Ported from
 // prototypes/codegen-client/runtime.ts: a generic runtime parameterized by a
 // generated `as const` schema — all typing lives here as mapped types. The
@@ -233,10 +253,12 @@ export interface ClientOptions {
    */
   maxResults?: number;
   /**
-   * Set by codegen when the build pre-compressed the manifest (`gzip: true`). Only the manifest needs
-   * telling: everything else it points at carries `.gz` in its own path. Hand-written callers of
+   * Set by codegen when the build pre-compressed the manifest. Only the manifest needs telling:
+   * everything else it points at carries `.gz`/`.br` in its own path. Hand-written callers of
    * `createClient` must match their deploy; the generated `connect()` already does.
    */
+  manifestCompression?: Compression;
+  /** @deprecated Use `manifestCompression: "gzip"`. */
   manifestGzip?: boolean;
 }
 

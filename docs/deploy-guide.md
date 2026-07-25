@@ -55,8 +55,19 @@ Same-origin deploys (the common case: `public/shard-data/` under your own site) 
 - **Never double-compress**: if you enable build-time `gzip`, make sure the host doesn't *also*
   re-gzip an already-gzipped `.gz` file — check the `Content-Encoding` response header actually
   served, not just what you configured. This is the main reason `gzip` is off by default.
-- Brotli is **not** handled by the runtime directly (`DecompressionStream` is gzip/deflate only) —
-  rely on the host's transport-level Brotli instead of a build-time option for it.
+- **Brotli** is available as `compression: "brotli"` — `DecompressionStream` now supports it per the
+  Compression Streams spec (note the naming trap: the file suffix is `.br`, matching
+  `Content-Encoding: br`, but the API's format string is `"brotli"`). It is **not** the default, and
+  the reason is not just client support:
+
+  Brotli's advantage over gzip grows with file size, and static-shard deliberately ships *many small
+  files*. Measured on real JSON: **7%** smaller on a 45 KB index chunk, **13%** at 256 KB, **24%** on
+  a 1 MB shard, **35%** on a 40 MB single blob. So static-shard operates at the low end of brotli's
+  range — on a whole example deploy it came out 2.32 MB against gzip's 2.48 MB, a ~6% win.
+
+  Prefer the host's transport-level brotli where you can have it: it gets the same ratio with per-client
+  negotiation, which a baked file cannot. Reach for `compression: "brotli"` when the host compresses
+  nothing and you want every byte.
 
 ## Request amplification
 

@@ -69,6 +69,18 @@
       "minimum": 1,
       "description": "Target compressed shard size in bytes. Default 2 MiB."
     },
+    "compression": {
+      "enum": [
+        "none",
+        "gzip",
+        "brotli"
+      ],
+      "description": "Pre-compress every served file (shards, index chunks, zonemap sidecars, manifest) at build time, decompressed in the browser via the native DecompressionStream API — no library, no WASM. Default \"none\": prefer the host's Content-Encoding, which negotiates per client, whereas a pre-compressed file cannot fall back — a client lacking the format fails outright. Use this only when your host won't compress for you. \"brotli\" beats \"gzip\" by ~7% on a 45 KB index chunk and ~24% on a 1 MB shard (its advantage grows with file size, and static-shard ships small files), at the same build cost, but has narrower client support."
+    },
+    "gzip": {
+      "type": "boolean",
+      "description": "DEPRECATED — use `compression: \"gzip\"`. Kept so existing configs keep working; setting both to conflicting values is an error."
+    },
     "indexChunkBytes": {
       "type": "integer",
       "minimum": 1,

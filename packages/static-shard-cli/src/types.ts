@@ -1,4 +1,24 @@
 /**
+ * How the deploy pre-compresses every file it serves (ADR-0002 §8). `"none"` is the default: most
+ * hosts apply `Content-Encoding` themselves, which negotiates per client, whereas a pre-compressed
+ * file cannot — a baked `.br` is unreadable to a client without brotli, with no fallback.
+ *
+ * Note the mismatch the file extension hides: the served suffix is `.br` (matching `Content-Encoding:
+ * br`), but the DecompressionStream format string is `"brotli"`.
+ */
+export type Compression = "none" | "gzip" | "brotli";
+
+/** The suffix a compressed file carries. Duplicated in both packages and pinned by an equivalence test — the runtime must derive shard paths without reading anything the CLI wrote. */
+export function compressionSuffix(compression: Compression): string {
+  return compression === "gzip" ? ".gz" : compression === "brotli" ? ".br" : "";
+}
+
+/** The `DecompressionStream` format name for a compression, or `undefined` when nothing was applied. */
+export function decompressionFormat(compression: Compression): "gzip" | "brotli" | undefined {
+  return compression === "none" ? undefined : compression;
+}
+
+/**
  * `"json"` is the payload-only kind: a field whose values aren't a queryable scalar/date or
  * `string[]` (nested objects, `number[]`, object arrays, mixed-type fields). It is carried verbatim
  * in each record's payload and returned by `findMany`, but is never indexed and never appears in
@@ -66,8 +86,15 @@ export interface StaticShardConfig {
   basePath?: string;
   /** Target compressed shard size in bytes. Default 2 MiB. */
   shardBytes?: number;
-  /** Opt-in build-time gzip of shard payloads, decompressed at runtime via the native `DecompressionStream` API — no library, no WASM (ADR-0002 §8). Default false (host `Content-Encoding` handles transport compression instead). */
+  /** @deprecated Use `compression: "gzip"`. Kept so existing configs keep working; setting both to conflicting values is an error. */
   gzip?: boolean;
+  /**
+   * Opt-in build-time compression of every served file — shards, index chunks, zonemap sidecars and
+   * the manifest — decompressed at runtime via the native `DecompressionStream` API, no library and
+   * no WASM (ADR-0002 §8). Default `"none"`: the host's `Content-Encoding` negotiates per client,
+   * which a baked file cannot. Use this only when your host won't compress for you.
+   */
+  compression?: Compression;
   /** Target gzipped size per secondary-index chunk, in bytes. Default ~45 KB (ADR-0003 §5). */
   indexChunkBytes?: number;
   schema: {
@@ -90,7 +117,7 @@ export interface ResolvedConfig {
   clientOut: string;
   basePath: string;
   shardBytes: number;
-  gzip: boolean;
+  compression: Compression;
   indexChunkBytes: number;
   sortField: string;
   pk?: string;
@@ -187,6 +214,13 @@ export interface Manifest {
     shardCount: number;
     sortField: string;
     /** Present (`true`) only when shard payloads are gzipped at build time (ADR-0002 §8) — omitted otherwise. */
+    /**
+     * How every served file was pre-compressed, when the build did so (ADR-0002 §8). Absent means
+     * plain files. `gzip?: true` is the pre-`compression` spelling, still read so an older deploy keeps
+     * working against a newer client.
+     */
+    compression?: Compression;
+    /** @deprecated Superseded by `compression: "gzip"`. */
     gzip?: true;
   };
   schema: SchemaDescriptor;

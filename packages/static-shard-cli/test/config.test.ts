@@ -23,12 +23,27 @@ describe("resolveConfig", () => {
     expect(resolved.shardBytes).toBeGreaterThan(0);
     expect(resolved.inputPath).toBe("/repo/data/movies.ndjson");
     expect(resolved.inputFormat).toBe("ndjson");
-    expect(resolved.gzip).toBe(false);
+    expect(resolved.compression).toBe("none");
   });
 
-  test("honors an explicit gzip: true override (T13, ADR-0002 §8)", () => {
-    const resolved = resolveConfig({ ...base, gzip: true }, "/repo");
-    expect(resolved.gzip).toBe(true);
+  test("honors the deprecated gzip: true as compression: gzip (ADR-0002 §8)", () => {
+    expect(resolveConfig({ ...base, gzip: true }, "/repo").compression).toBe("gzip");
+    expect(resolveConfig({ ...base, gzip: false }, "/repo").compression).toBe("none");
+  });
+
+  test("honors an explicit compression setting, brotli included", () => {
+    expect(resolveConfig({ ...base, compression: "brotli" }, "/repo").compression).toBe("brotli");
+    expect(resolveConfig({ ...base, compression: "none" }, "/repo").compression).toBe("none");
+  });
+
+  test("rejects a compression/gzip pair that disagrees rather than picking a winner silently", () => {
+    expect(() => resolveConfig({ ...base, compression: "brotli", gzip: false }, "/repo")).toThrow(/disagree/);
+    // ...but the redundant-and-consistent combination is fine
+    expect(resolveConfig({ ...base, compression: "gzip", gzip: true }, "/repo").compression).toBe("gzip");
+  });
+
+  test("rejects an unknown compression value", () => {
+    expect(() => resolveConfig({ ...base, compression: "lz4" as never }, "/repo")).toThrow(/compression/);
   });
 
   test("honors explicit output/clientOut/basePath/shardBytes overrides", () => {

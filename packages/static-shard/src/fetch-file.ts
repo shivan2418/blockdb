@@ -5,6 +5,7 @@
 // injected fetch's / CDN's job (§2).
 
 import { ShardError } from "./errors.js";
+import { decompressionFormat, type Compression } from "./types.js";
 
 /**
  * 404 routes by WHICH file was being fetched — always known at the call site
@@ -94,26 +95,39 @@ export async function fetchText(
   }
 }
 
+/** The compression a served path implies. `.br` is the file suffix; `"brotli"` is the API's format name. */
+export function compressionOfPath(url: string): Compression {
+  if (url.endsWith(".gz")) return "gzip";
+  if (url.endsWith(".br")) return "brotli";
+  return "none";
+}
+
 /**
- * Fetch + gzip-decompress + text, for opt-in build-time-gzipped shards (ADR-0002 §8) — the native
- * `DecompressionStream` API, no library/WASM. A 2xx body that isn't valid gzip, or won't read
- * once decompressed, is CORRUPT_DATA (same contract as `fetchText`).
+ * Fetch + decompress + text, for build-time-compressed files (ADR-0002 §8) — the native
+ * `DecompressionStream` API, no library/WASM. A 2xx body that won't decompress, or won't read once
+ * decompressed, is CORRUPT_DATA (same contract as `fetchText`). Unlike transport `Content-Encoding`,
+ * this cannot fall back: a client whose DecompressionStream lacks the format has no second option,
+ * which is why build-time compression stays opt-in.
  */
-export async function fetchGzippedText(
+export async function fetchCompressedText(
   url: string,
   kind: FetchedFileKind,
+  format: "gzip" | "brotli",
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<string> {
   const response = await fetchOk(url, kind, fetchImpl, signal);
   try {
-    const decompressed = response.body!.pipeThrough(new DecompressionStream("gzip"));
+    // Cast: TypeScript's DOM lib still types CompressionFormat as gzip/deflate/deflate-raw, though
+    // "brotli" is in the Compression Streams spec and shipping. The runtime check that matters is the
+    // catch below — an engine without the format throws here and surfaces as CORRUPT_DATA.
+    const decompressed = response.body!.pipeThrough(new DecompressionStream(format as CompressionFormat));
     return await new Response(decompressed).text();
   } catch (cause) {
     throw new ShardError({
       code: "CORRUPT_DATA",
       url,
-      message: `static-shard: the gzip body of "${url}" could not be decompressed — the deploy is corrupt. Re-run \`static-shard build\` and redeploy.`,
+      message: `static-shard: the ${format} body of "${url}" could not be decompressed — the deploy is corrupt, or this browser lacks ${format} support in DecompressionStream. Re-run \`static-shard build\` and redeploy.`,
       cause,
     });
   }
@@ -133,8 +147,9 @@ export async function fetchReferencedJson(
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  if (!url.endsWith(".gz")) return await fetchJson(url, "referenced", fetchImpl, signal);
-  const text = await fetchGzippedText(url, "referenced", fetchImpl, signal);
+  const format = decompressionFormat(compressionOfPath(url));
+  if (format === undefined) return await fetchJson(url, "referenced", fetchImpl, signal);
+  const text = await fetchCompressedText(url, "referenced", format, fetchImpl, signal);
   return parseCorruptible(url, () => JSON.parse(text) as unknown);
 }
 

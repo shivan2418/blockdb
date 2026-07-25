@@ -960,6 +960,7 @@ describe("seam #2 — gzip shard payloads (T13, ADR-0002 §8)", () => {
       { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
     );
     const clientTs = await readFile(path.join(clientOutDir, "client.ts"), "utf8");
-    expect(clientTs).toMatch(/manifestGzip: MANIFEST_GZIP/);
+    expect(clientTs).toMatch(/manifestCompression: MANIFEST_COMPRESSION/);
+    expect(clientTs).toMatch(/MANIFEST_COMPRESSION = "gzip"/);
   });
 });

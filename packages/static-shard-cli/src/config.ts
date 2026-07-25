@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import type { InputFormat, ResolvedConfig, StaticShardConfig } from "./types.js";
+import type { Compression, InputFormat, ResolvedConfig, StaticShardConfig } from "./types.js";
 
 const DEFAULT_OUTPUT = "public/shard-data";
 const DEFAULT_CLIENT_OUT = "src/shard-db";
@@ -8,6 +8,7 @@ const DEFAULT_SHARD_BYTES = 2_097_152; // 2 MiB
 /** ~45 KB gzipped anchor (ADR-0003 §5) — exported so the wizard's live estimates (T12) use the same default `build` would. */
 export const DEFAULT_INDEX_CHUNK_BYTES = 45_000;
 const INPUT_FORMATS = ["ndjson", "json", "csv", "tsv"] as const;
+const COMPRESSIONS = ["none", "gzip", "brotli"] as const;
 /**
  * Field kinds a sort field may have (ADR-0002 §2). Exported so `infer`'s candidate predicate and
  * the wizard's candidate list share this exact set rather than keeping second copies that could
@@ -16,6 +17,28 @@ const INPUT_FORMATS = ["ndjson", "json", "csv", "tsv"] as const;
 export const SORTABLE_KINDS = ["number", "date", "string"] as const;
 export type SortableKind = (typeof SORTABLE_KINDS)[number];
 const DEFAULT_DELIMITERS: Partial<Record<InputFormat, string>> = { csv: ",", tsv: "\t" };
+
+/**
+ * Reconciles the modern `compression` field with the original boolean `gzip`. They can disagree only
+ * by mistake, so a conflict is an error rather than a silent precedence rule.
+ */
+function resolveCompression(config: StaticShardConfig): Compression {
+  const { compression, gzip } = config;
+  if (compression !== undefined && !COMPRESSIONS.includes(compression)) {
+    throw new Error(`static-shard: compression "${compression}" is not one of ${COMPRESSIONS.join(" / ")}`);
+  }
+  if (compression !== undefined && gzip !== undefined) {
+    const implied = gzip ? "gzip" : "none";
+    if (implied !== compression) {
+      throw new Error(
+        `static-shard: config sets compression: "${compression}" and gzip: ${gzip}, which disagree — ` +
+          `drop the deprecated "gzip" field and keep "compression".`,
+      );
+    }
+  }
+  if (compression !== undefined) return compression;
+  return gzip === true ? "gzip" : "none";
+}
 
 function defaultBasePath(output: string): string {
   const normalized = output.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -199,7 +222,7 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
     clientOut: path.resolve(baseDir, config.clientOut ?? DEFAULT_CLIENT_OUT),
     basePath: config.basePath ?? defaultBasePath(output),
     shardBytes: config.shardBytes ?? DEFAULT_SHARD_BYTES,
-    gzip: config.gzip ?? false,
+    compression: resolveCompression(config),
     indexChunkBytes: config.indexChunkBytes ?? DEFAULT_INDEX_CHUNK_BYTES,
     sortField,
     ...(pk !== undefined ? { pk } : {}),

@@ -361,17 +361,22 @@ describe("buildManifest", () => {
     expect(manifest.schema.pk).toBeUndefined();
   });
 
-  test("T13: config.gzip true carries dataset.gzip: true; false/absent omits it entirely", () => {
-    const gzipManifest = buildManifest({
-      config: { ...config, gzip: true },
-      shardFiles,
-      splitPoints,
-      formatVersion: 0,
-      generatorVersion: "0.0.0",
-    });
-    expect(gzipManifest.dataset.gzip).toBe(true);
+  test("carries dataset.compression when the build compressed, and omits it entirely when it didn't", () => {
+    for (const compression of ["gzip", "brotli"] as const) {
+      const built = buildManifest({
+        config: { ...config, compression },
+        shardFiles,
+        splitPoints,
+        formatVersion: 0,
+        generatorVersion: "0.0.0",
+      });
+      expect(built.dataset.compression).toBe(compression);
+      // the pre-`compression` boolean is not emitted alongside it — one field, one source of truth
+      expect(built.dataset.gzip).toBeUndefined();
+    }
 
-    const plainManifest = buildManifest({ config, shardFiles, splitPoints, formatVersion: 0, generatorVersion: "0.0.0" });
-    expect(plainManifest.dataset.gzip).toBeUndefined();
+    const plain = buildManifest({ config, shardFiles, splitPoints, formatVersion: 0, generatorVersion: "0.0.0" });
+    expect(plain.dataset.compression).toBeUndefined();
+    expect(plain.dataset.gzip).toBeUndefined();
   });
 });

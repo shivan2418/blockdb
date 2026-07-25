@@ -1,5 +1,6 @@
 import { ShardError } from "./errors.js";
-import { fetchGzippedText, fetchJson, parseCorruptible } from "./fetch-file.js";
+import { compressionSuffix, decompressionFormat, type Compression } from "./types.js";
+import { fetchCompressedText, fetchJson, parseCorruptible } from "./fetch-file.js";
 import { FORMAT_VERSION } from "./version.js";
 
 export interface ShardDescriptor {
@@ -84,6 +85,13 @@ export interface Manifest {
     shardCount: number;
     sortField: string;
     /** Present (`true`) only when shard payloads are gzipped at build time (ADR-0002 §8) — omitted otherwise. */
+    /**
+     * How every served file was pre-compressed, when the build did so (ADR-0002 §8). Absent means
+     * plain files. `gzip?: true` is the pre-`compression` spelling, still read so an older deploy keeps
+     * working against a newer client.
+     */
+    compression?: Compression;
+    /** @deprecated Superseded by `compression: "gzip"`. */
     gzip?: true;
   };
   schema: SchemaDescriptor;
@@ -99,14 +107,19 @@ export interface Manifest {
  * generated client carries the answer instead, stamped by the same `build` that wrote the file, so the
  * two cannot drift.
  */
-export async function fetchManifest(basePath: string, fetchImpl: typeof fetch, gzipped = false): Promise<Manifest> {
-  const url = `${basePath}/manifest.json${gzipped ? ".gz" : ""}`;
+export async function fetchManifest(
+  basePath: string,
+  fetchImpl: typeof fetch,
+  compression: Compression = "none",
+): Promise<Manifest> {
+  const url = `${basePath}/manifest.json${compressionSuffix(compression)}`;
+  const format = decompressionFormat(compression);
   let parsed: Manifest;
-  if (gzipped) {
-    const text = await fetchGzippedText(url, "manifest", fetchImpl);
-    parsed = parseCorruptible(url, () => JSON.parse(text) as Manifest);
-  } else {
+  if (format === undefined) {
     parsed = (await fetchJson(url, "manifest", fetchImpl)) as Manifest;
+  } else {
+    const text = await fetchCompressedText(url, "manifest", format, fetchImpl);
+    parsed = parseCorruptible(url, () => JSON.parse(text) as Manifest);
   }
   // JSON-valid but not a manifest — the body "won't parse" into one (ADR-0007 §5).
   if (typeof parsed.formatVersion !== "number") {
@@ -127,4 +140,12 @@ export async function fetchManifest(basePath: string, fetchImpl: typeof fetch, g
     });
   }
   return parsed;
+}
+
+/**
+ * How this deploy compressed the files the manifest points at. Reads the modern `compression` field
+ * and falls back to the original `gzip: true`, so a tree built before the field existed still works.
+ */
+export function datasetCompression(manifest: Manifest): Compression {
+  return manifest.dataset.compression ?? (manifest.dataset.gzip === true ? "gzip" : "none");
 }

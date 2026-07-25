@@ -164,7 +164,7 @@ export function buildManifest(opts: {
       recordCount,
       shardCount: shardFiles.length,
       sortField: config.sortField,
-      ...(config.gzip ? { gzip: true as const } : {}),
+      ...(config.compression !== "none" ? { compression: config.compression } : {}),
     },
     schema,
     shards: shardFiles.map(({ hash, bytes, count }) => ({ hash, bytes, count })),

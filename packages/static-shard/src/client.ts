@@ -2,7 +2,7 @@ import { fetchIndexChunk } from "./index-fetch.js";
 import { ShardError } from "./errors.js";
 import { parseCorruptible } from "./fetch-file.js";
 import { matchesWhere } from "./filter.js";
-import { fetchManifest, type IndexChunkDirEntry, type Manifest, type PairZonemapEntry } from "./manifest.js";
+import { datasetCompression, fetchManifest, type IndexChunkDirEntry, type Manifest, type PairZonemapEntry } from "./manifest.js";
 import {
   chunksForFilter,
   decodeIndexChunk,
@@ -310,7 +310,7 @@ function fetchShardAt(manifest: Manifest, ctx: FetchContext, index: number): Pro
       ctx.basePath,
       manifest.shards[index]!.hash,
       manifest.shards.length,
-      manifest.dataset.gzip === true,
+      datasetCompression(manifest),
       ctx.fetchImpl,
       ctx.signal,
     ),
@@ -448,7 +448,7 @@ export function createClient<S extends SchemaMeta, Records>(
   const fetchImpl = opts.fetch ?? fetch;
   const maxResults = opts.maxResults ?? DEFAULT_MAX_RESULTS;
   let manifestPromise: Promise<Manifest> | undefined;
-  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl, opts.manifestGzip === true));
+  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl, opts.manifestCompression ?? (opts.manifestGzip === true ? "gzip" : "none")));
 
   const makeCollection = (meta: CollectionMeta) => {
     const collection: Record<string, unknown> = {

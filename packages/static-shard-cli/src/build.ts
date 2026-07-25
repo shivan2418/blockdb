@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
 import { resolveConfig } from "./config.js";
 import { generateClientTs, generateSchemaTs } from "./codegen.js";
 import { assertNoSchemaDrift } from "./drift.js";
@@ -21,6 +21,7 @@ import type { ShardFile } from "./shard.js";
 import { externalSort, type SortKind } from "./sort.js";
 import type { OnProgress } from "./progress.js";
 import type { BuiltIndexChunk } from "./secondary-index.js";
+import { compressionSuffix, type Compression } from "./types.js";
 import type { IndexChunkDirEntry, Manifest, PairZonemapEntry, ResolvedConfig, StaticShardConfig } from "./types.js";
 import { getFormatVersion, getGeneratorVersion } from "./version.js";
 import {
@@ -31,6 +32,24 @@ import {
   unselectiveTextIndexWarning,
 } from "./warnings.js";
 import { spillOversizedZonemaps } from "./zonemap-budget.js";
+
+/**
+ * Brotli quality for build-time compression. Not the default 11: measured on 40 MB of real JSON, q11
+ * took 31s for 14.4x while q5 took 247ms for 11.8x — the same wall-clock as gzip, which manages 7.65x.
+ * q11 would add minutes to every build for a further ~15%, on files a CDN caches anyway.
+ */
+const BROTLI_QUALITY = 5;
+
+/** Applies the deploy's build-time compression to one file's bytes. */
+function compressServedFile(content: string, compression: Compression): string | Buffer {
+  if (compression === "gzip") return gzipSync(content);
+  if (compression === "brotli") {
+    return brotliCompressSync(Buffer.from(content, "utf8"), {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY },
+    });
+  }
+  return content;
+}
 
 /** Records buffered per sorted run before `externalSort` spills to disk (ADR-0002 §9) — tunable per-call for tests, not part of the persisted config (an execution concern, not a design decision). */
 const DEFAULT_SORT_RUN_RECORDS = 200_000;
@@ -110,7 +129,7 @@ export function materialize(
   // flag to keep in sync and a tree mixing compressed and plain files still reads correctly.
   // `indexFiles[].content` stays LOGICAL (uncompressed) — `build` compresses at write time, and
   // `inspect --config` reports off the same logical bytes a real build would hash.
-  const servedSuffix = resolved.gzip ? ".gz" : "";
+  const servedSuffix = compressionSuffix(resolved.compression);
 
   const addIndexChunks = (field: string, subdir: string | null, builtChunks: BuiltIndexChunk[]): IndexChunkDirEntry[] =>
     builtChunks.map(({ from, to, content }) => {
@@ -273,12 +292,12 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
   mkdirSync(resolved.output, { recursive: true });
   let shardsWritten = 0;
   for (const file of shardFiles) {
-    const filePath = path.join(resolved.output, shardRelPath(file.hash, shardFiles.length, resolved.gzip));
+    const filePath = path.join(resolved.output, shardRelPath(file.hash, shardFiles.length, resolved.compression));
     mkdirSync(path.dirname(filePath), { recursive: true });
     // Compression is a transport concern applied only at write time — the content-hash (computed
     // in `shard.ts`) stays over the LOGICAL uncompressed NDJSON, so toggling gzip between rebuilds
     // never perturbs shard hashes or the manifest/index structures keyed on them.
-    writeFileSync(filePath, resolved.gzip ? gzipSync(file.content) : file.content);
+    writeFileSync(filePath, compressServedFile(file.content, resolved.compression));
     progress?.({ phase: "writing data files", done: ++shardsWritten, total: shardFiles.length, unit: "count" });
   }
   let indexFilesWritten = 0;
@@ -286,7 +305,7 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
     const filePath = path.join(resolved.output, relPath);
     mkdirSync(path.dirname(filePath), { recursive: true });
     // The relPath the manifest already points at decides this — see `servedSuffix` in `materialize`.
-    writeFileSync(filePath, relPath.endsWith(".gz") ? gzipSync(content) : content);
+    writeFileSync(filePath, compressServedFile(content, resolved.compression));
     progress?.({ phase: "writing index files", done: ++indexFilesWritten, total: indexFiles.length, unit: "count" });
   }
   // Minified, not pretty-printed: every client downloads this file before it can run a query, and
@@ -298,8 +317,8 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
   // were current — and the generated client below is stamped with which one to fetch.
   const manifestJson = JSON.stringify(manifest);
   writeFileSync(
-    path.join(resolved.output, resolved.gzip ? "manifest.json.gz" : "manifest.json"),
-    resolved.gzip ? gzipSync(manifestJson) : manifestJson,
+    path.join(resolved.output, `manifest.json${compressionSuffix(resolved.compression)}`),
+    compressServedFile(manifestJson, resolved.compression),
   );
 
   progress?.({ phase: "generating client", done: 1, total: 1, unit: "count" });
@@ -310,7 +329,7 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
     generateClientTs(manifest, {
       basePath: resolved.basePath,
       generatorVersion,
-      ...(resolved.gzip ? { manifestGzip: true } : {}),
+      ...(resolved.compression !== "none" ? { manifestCompression: resolved.compression } : {}),
     }),
   );
 

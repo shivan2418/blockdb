@@ -38,7 +38,7 @@ describe("fetchShardRecords", () => {
   test("parses NDJSON lines into records", async () => {
     const body = '{"year":2000,"title":"A"}\n{"year":2001,"title":"B"}\n';
     const fetchImpl = fakeFetch({ "/data/shards/abc123.ndjson": { status: 200, body } });
-    const records = await fetchShardRecords("/data", "abc123", 1, false, fetchImpl);
+    const records = await fetchShardRecords("/data", "abc123", 1, "none", fetchImpl);
     expect(records).toEqual([
       { year: 2000, title: "A" },
       { year: 2001, title: "B" },
@@ -47,7 +47,7 @@ describe("fetchShardRecords", () => {
 
   test("a manifest-referenced shard 404 → DEPLOY_INTEGRITY with a rebuild-and-redeploy remediation (ADR-0007 §6)", async () => {
     const fetchImpl = fakeFetch({ "/data/shards/missing.ndjson": { status: 404, body: "" } });
-    const error = await fetchShardRecords("/data", "missing", 1, false, fetchImpl).then(
+    const error = await fetchShardRecords("/data", "missing", 1, "none", fetchImpl).then(
       () => {
         throw new Error("expected rejection");
       },
@@ -63,7 +63,7 @@ describe("fetchShardRecords", () => {
   test("a 2xx shard body with an unparseable NDJSON line → CORRUPT_DATA with the parse error as cause", async () => {
     const body = '{"year":2000,"title":"A"}\nnot-json\n';
     const fetchImpl = fakeFetch({ "/data/shards/bad.ndjson": { status: 200, body } });
-    const error = await fetchShardRecords("/data", "bad", 1, false, fetchImpl).then(
+    const error = await fetchShardRecords("/data", "bad", 1, "none", fetchImpl).then(
       () => {
         throw new Error("expected rejection");
       },
@@ -82,21 +82,21 @@ describe("fetchShardRecords", () => {
       return { ok: true, status: 200, text: async () => '{"a":1}\n' } as Response;
     }) as typeof fetch;
     const controller = new AbortController();
-    await fetchShardRecords("/data", "abc", 1, false, fetchImpl, controller.signal);
+    await fetchShardRecords("/data", "abc", 1, "none", fetchImpl, controller.signal);
     expect(seenSignal).toBe(controller.signal);
   });
 
   test("nests under a 2-hex-char prefix subdir once shardCount exceeds ~1,000 (ADR-0002 §8)", async () => {
     const body = '{"year":2000,"title":"A"}\n';
     const fetchImpl = fakeFetch({ "/data/shards/ab/abc123.ndjson": { status: 200, body } });
-    const records = await fetchShardRecords("/data", "abc123", 1001, false, fetchImpl);
+    const records = await fetchShardRecords("/data", "abc123", 1001, "none", fetchImpl);
     expect(records).toEqual([{ year: 2000, title: "A" }]);
   });
 
   test("stays flat at exactly the threshold (1000 shards)", async () => {
     const body = '{"year":2000,"title":"A"}\n';
     const fetchImpl = fakeFetch({ "/data/shards/abc123.ndjson": { status: 200, body } });
-    const records = await fetchShardRecords("/data", "abc123", 1000, false, fetchImpl);
+    const records = await fetchShardRecords("/data", "abc123", 1000, "none", fetchImpl);
     expect(records).toEqual([{ year: 2000, title: "A" }]);
   });
 
@@ -104,7 +104,7 @@ describe("fetchShardRecords", () => {
     test("fetches a .ndjson.gz shard, decompresses, and parses NDJSON", async () => {
       const body = '{"year":2000,"title":"A"}\n{"year":2001,"title":"B"}\n';
       const fetchImpl = fakeBinaryFetch("/data/shards/abc123.ndjson.gz", gzipSync(body));
-      const records = await fetchShardRecords("/data", "abc123", 1, true, fetchImpl);
+      const records = await fetchShardRecords("/data", "abc123", 1, "gzip", fetchImpl);
       expect(records).toEqual([
         { year: 2000, title: "A" },
         { year: 2001, title: "B" },
@@ -114,13 +114,13 @@ describe("fetchShardRecords", () => {
     test("nests under a hash-prefix subdir with the .gz extension once past the shard-count threshold", async () => {
       const body = '{"year":2000,"title":"A"}\n';
       const fetchImpl = fakeBinaryFetch("/data/shards/ab/abc123.ndjson.gz", gzipSync(body));
-      const records = await fetchShardRecords("/data", "abc123", 1001, true, fetchImpl);
+      const records = await fetchShardRecords("/data", "abc123", 1001, "gzip", fetchImpl);
       expect(records).toEqual([{ year: 2000, title: "A" }]);
     });
 
     test("a 2xx body that isn't valid gzip → CORRUPT_DATA", async () => {
       const fetchImpl = fakeBinaryFetch("/data/shards/bad.ndjson.gz", new TextEncoder().encode("not gzip"));
-      const error = await fetchShardRecords("/data", "bad", 1, true, fetchImpl).then(
+      const error = await fetchShardRecords("/data", "bad", 1, "gzip", fetchImpl).then(
         () => {
           throw new Error("expected rejection");
         },
