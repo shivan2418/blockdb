@@ -789,7 +789,7 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
     const cost =
       measured === undefined
         ? dim(pad(f.kind + " · " + fmtInt(f.cardinality) + " distinct", 40))
-        : dim(pad(`${f.kind} · ${f.name === measured.field ? "" : measured.field + " "}filters read ~${Math.round(measured.scatter * 100)}% of files`, 40));
+        : dim(pad(`${f.kind} · ${measured.field} filters read ~${Math.round(measured.scatter * 100)}%`, 40));
     const plain = `  ${marker} ${pad(f.name, 22)} ${cost}${rec}`;
     return renderRow(plain, { cursor: idx === state.cursor });
   });
