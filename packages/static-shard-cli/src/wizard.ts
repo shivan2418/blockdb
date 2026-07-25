@@ -29,6 +29,22 @@ export const CHUNK_STEPS = [65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_
  * filters on — asking for it first meant recommending locality before knowing what locality was for,
  * which is how a bulk-maintenance timestamp wins.
  */
+/**
+ * Cap on records the wizard PROFILES for its live estimates, independent of how many inference read.
+ *
+ * These are different jobs with opposite needs. Inference decides the baked schema, so it reads
+ * everything (a value union missing a late value is a lasting bug). The estimates are re-derived on
+ * every keypress — profiling, index sizing, and the sort-field locality measurement all walk these
+ * records — so their cost has to be flat in dataset size or the wizard stops responding. Measured on a
+ * 116k-record dataset before this cap: 45 SECONDS per keypress.
+ *
+ * Estimates stay accurate anyway because the numbers that scale with dataset size (shard count, first
+ * download) are computed from `population`'s true totals, not from `records.length`; what the sample
+ * supplies is per-field shape — cardinality ratios, value sizes, locality — which is what sampling
+ * estimates well.
+ */
+export const ESTIMATE_SAMPLE_MAX = 2000;
+
 export const STAGE_LABELS = ["Detect", "Filter fields", "Sort field", "Text search", "File size", "Review"] as const;
 export const LAST_STAGE = STAGE_LABELS.length - 1;
 const FILTER_STAGE = 1;
@@ -57,7 +73,11 @@ export interface WizardData {
   recommendedIndexed: string[];
   /** Fields eligible as the sort field: always-present, single-valued number/date/string (ADR-0002 §2). */
   sortCandidates: string[];
-  /** The (sample or full-scan) records the wizard's live estimates are profiled against. */
+  /**
+   * The records the wizard's live estimates are profiled against — capped at `ESTIMATE_SAMPLE_MAX`,
+   * however many inference itself read. Re-walked on every keypress, so this must not grow with the
+   * dataset; true whole-dataset totals live in `population`.
+   */
   records: Record<string, unknown>[];
   /** True whole-dataset totals so size/shard estimates reflect the full input even when `records` is a sample. */
   population: PopulationStats;
@@ -75,6 +95,7 @@ export function buildWizardData(records: Record<string, unknown>[], population?:
   if (records.length === 0) {
     throw new Error("static-shard: the wizard found no records in the input to infer a schema from");
   }
+  // Inference sees every record it was given; only the estimate sample below is capped.
   const inferred = inferSchema(records);
   const fields: WizardField[] = Object.entries(inferred.fields)
     .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi }))
@@ -95,7 +116,7 @@ export function buildWizardData(records: Record<string, unknown>[], population?:
     recommendedPk: inferred.pk,
     recommendedIndexed: inferred.indexedFields,
     sortCandidates,
-    records,
+    records: records.length > ESTIMATE_SAMPLE_MAX ? records.slice(0, ESTIMATE_SAMPLE_MAX) : records,
     population: pop,
   };
 }
@@ -282,19 +303,46 @@ function scatterOf(
  * its own contribution, so "prefer a field you query" falls out of the measurement instead of being
  * a special case bolted on top.
  */
+/**
+ * Memoizes the locality table, which is by far the most expensive thing `estimateForState` does (one
+ * sort of the sample per candidate per probe field). It depends on nothing else in `WizardState` — not
+ * the cursor, not the type-to-filter query, not the current sort field — so moving the cursor down a
+ * list of 24 candidates recomputed an identical table 24 times. Keyed on identity of the record array
+ * plus the inputs that actually change the answer.
+ */
+const localityCache = new Map<string, Record<string, SortFieldLocality>>();
+const localityCacheKeys = new WeakMap<Record<string, unknown>[], number>();
+let nextRecordsId = 0;
+
+function localityCacheKey(data: WizardData, state: WizardState, bins: number): string {
+  let id = localityCacheKeys.get(data.records);
+  if (id === undefined) {
+    id = nextRecordsId++;
+    localityCacheKeys.set(data.records, id);
+  }
+  return `${id}|${bins}|${[...state.indexedFields].sort().join(",")}`;
+}
+
 export function sortFieldLocality(
   data: WizardData,
   state: WizardState,
   shardCount: number,
 ): Record<string, SortFieldLocality> {
   const bins = Math.max(2, Math.min(LOCALITY_MAX_BINS, shardCount, data.records.length));
+  const cacheKey = localityCacheKey(data, state, bins);
+  const cached = localityCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const byName = new Map(data.fields.map((f) => [f.name, f]));
   const probes = [...state.indexedFields]
     .sort()
     .slice(0, LOCALITY_PROBE_FIELDS)
     .map((name) => byName.get(name))
     .filter((f): f is WizardField => f !== undefined);
-  if (probes.length === 0) return {};
+  if (probes.length === 0) {
+    localityCache.set(cacheKey, {});
+    return {};
+  }
 
   const out: Record<string, SortFieldLocality> = {};
   for (const candidate of data.sortCandidates) {
@@ -317,6 +365,7 @@ export function sortFieldLocality(
     const best = measured.reduce((lo, m) => (m.scatter < lo.scatter ? m : lo));
     out[candidate] = { mean, best };
   }
+  localityCache.set(cacheKey, out);
   return out;
 }
 
@@ -537,7 +586,37 @@ export interface WizardEstimate {
  * the indexed/endsWith/contains sets is a plain filter over already-computed per-field stats, not a
  * re-scan of the records.
  */
+/**
+ * Memoizes the whole estimate. It is a pure function of five state fields — the sort field, the three
+ * operator sets, and the shard-byte target — and of nothing else the user can touch: not the cursor,
+ * not the type-to-filter query, not the stage. Since `renderFrame` needs an estimate on every
+ * keypress, without this every arrow-key press re-profiled the sample and re-derived every index size
+ * to produce a byte-identical answer.
+ */
+const estimateCache = new Map<string, WizardEstimate>();
+
+function estimateCacheKey(data: WizardData, state: WizardState): string {
+  const set = (values: Set<string>) => [...values].sort().join(",");
+  return [
+    localityCacheKey(data, state, 0),
+    state.sortField,
+    state.shardBytes,
+    set(state.indexedFields),
+    set(state.endsWithFields),
+    set(state.containsFields),
+  ].join("|");
+}
+
 export function estimateForState(data: WizardData, state: WizardState): WizardEstimate {
+  const cacheKey = estimateCacheKey(data, state);
+  const cached = estimateCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const computed = computeEstimateForState(data, state);
+  estimateCache.set(cacheKey, computed);
+  return computed;
+}
+
+function computeEstimateForState(data: WizardData, state: WizardState): WizardEstimate {
   const forced = forcedIndexedFieldConfigs(data, state.sortField);
   const masterProfile = profileDataset(data.records, { sortField: state.sortField, fields: forced }, data.population);
 
