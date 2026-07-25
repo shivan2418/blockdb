@@ -576,7 +576,11 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
   const candidates = sortCandidateFields(data, state);
   const header = [
     bold("Pick ONE field to sort by."),
-    dim("  Free range filtering (before/after, less/greater) on this field; every other field needs an index."),
+    // Lead with locality, not the operator set: this choice decides what every query costs, and
+    // reading it as an incidental "which order do you want" is how a maintenance timestamp wins.
+    dim("  This decides which records are stored next to each other — the biggest lever on query cost."),
+    dim("  Filters on this field read a few files; filters on anything else may read most of them."),
+    dim("  Pick what you filter or sort by most. Text fields also get starts-with here for free."),
     "",
   ];
   const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
@@ -644,6 +648,8 @@ function renderTextSearch(data: WizardData, state: WizardState, estimate: Wizard
     bold("Extra ways to search text"),
     dim('  Exact match, "is one of", and starts-with are already on for every indexed text field.'),
     dim("  These add more, each with an extra index that loads only when it's used."),
+    dim("  Matching is case-sensitive: on Title Case data, contains \"bolt\" finds nothing, \"Bolt\" works."),
+    dim("  Skip these for ID, UUID and URL fields — their substrings sit in every file, so they can't narrow anything down."),
     "",
   ];
   const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
