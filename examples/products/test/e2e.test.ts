@@ -56,6 +56,39 @@ describe("products example: build -> deploy -> query in a browser", () => {
     });
   });
 
+  test("the generated value union drives a category picker that filters in the browser", async () => {
+    await withPage(server.url, async (page) => {
+      await page.waitForSelector('[data-testid="category-results"] li');
+
+      // the picker's options come from the codegen-exported union, not a hand-written list
+      const options = await page.$$eval('[data-testid="category-select"] option', (nodes) =>
+        nodes.map((n) => (n as HTMLOptionElement).value),
+      );
+      expect(options).toEqual([
+        "Electronics",
+        "Fitness",
+        "Garden",
+        "Kitchen",
+        "Office",
+        "Outdoors",
+        "Stationery",
+        "Toys",
+      ]);
+
+      await page.selectOption('[data-testid="category-select"]', "Kitchen");
+      await page.waitForFunction(() => {
+        const items = document.querySelectorAll('[data-testid="category-results"] li');
+        return items.length > 0;
+      });
+      const prices = await page.$$eval('[data-testid="category-results"] li', (nodes) =>
+        nodes.map((n) => Number(/\$([\d.]+)/.exec(n.textContent ?? "")?.[1])),
+      );
+      expect(prices.length).toBeGreaterThan(0);
+      expect(prices.length).toBeLessThanOrEqual(5);
+      expect(prices).toEqual([...prices].sort((a, b) => a - b));
+    });
+  });
+
   test("count() reports the full catalog size", async () => {
     await withPage(server.url, async (page) => {
       await page.waitForFunction(() => (document.getElementById("total-count")?.textContent ?? "").includes("products"));

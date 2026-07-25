@@ -28,16 +28,18 @@ async function runFiltered() {
 }
 
 async function main() {
+  // Wire listeners synchronously, before the first await: a submit that lands while the initial
+  // queries are still in flight would otherwise fall through to a native submit and reload the page.
+  document.getElementById("search-form")!.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void runSearch((document.getElementById("search-input") as HTMLInputElement).value);
+  });
+
   const { count } = await db.movies.count();
   document.getElementById("total-count")!.textContent = `${count} movies in the catalog`;
 
   await runSearch((document.getElementById("search-input") as HTMLInputElement).value);
   await runFiltered();
-
-  document.getElementById("search-form")!.addEventListener("submit", (e) => {
-    e.preventDefault();
-    void runSearch((document.getElementById("search-input") as HTMLInputElement).value);
-  });
 }
 
 void main();

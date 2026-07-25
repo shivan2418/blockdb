@@ -12,7 +12,11 @@
     "fields": {
       "sku": { "kind": "string", "indexed": true },
       "name": { "kind": "string", "indexed": true },
-      "category": { "kind": "string", "indexed": true },
+      "category": {
+        "kind": "string",
+        "indexed": true,
+        "values": ["Electronics", "Fitness", "Garden", "Kitchen", "Office", "Outdoors", "Stationery", "Toys"]
+      },
       "price": { "kind": "number" },
       "inStock": { "kind": "boolean", "indexed": true },
       "discountPct": { "kind": "number", "indexed": true, "absent": true }
