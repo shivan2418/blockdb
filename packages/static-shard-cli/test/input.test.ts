@@ -270,6 +270,44 @@ describe("readInputRecords — glob merges same-format files as one dataset", ()
   });
 });
 
+describe("readInputRecords — datasets past the argument-spread limit", () => {
+  // `push(...array)` throws "Maximum call stack size exceeded" somewhere above ~100k elements, so a
+  // dataset of exactly the size this tool targets used to fail outright. Records are kept tiny so
+  // the guard costs little; the count is what's under test.
+  const BIG = 200_000;
+
+  test("reads an NDJSON file with more records than can be spread as arguments", () => {
+    const file = path.join(tmpDir, "big.ndjson");
+    writeFileSync(file, Array.from({ length: BIG }, (_, i) => `{"year":${i}}`).join("\n") + "\n");
+    const records = readInputRecords(file, { format: "ndjson", delimiter: ",", fields: FIELDS });
+    expect(records).toHaveLength(BIG);
+    expect(records[BIG - 1]).toEqual({ year: BIG - 1 });
+  });
+
+  test("reads a JSON document with more records than can be spread as arguments", () => {
+    const file = path.join(tmpDir, "big.json");
+    writeFileSync(file, JSON.stringify(Array.from({ length: BIG }, (_, i) => ({ year: i }))));
+    const records = readInputRecords(file, { format: "json", delimiter: ",", fields: FIELDS });
+    expect(records).toHaveLength(BIG);
+  });
+
+  test("reads a CSV file with more records than can be spread as arguments", () => {
+    const file = path.join(tmpDir, "big.csv");
+    writeFileSync(file, "year\n" + Array.from({ length: BIG }, (_, i) => String(i)).join("\n") + "\n");
+    const records = readInputRecords(file, { format: "csv", delimiter: ",", fields: FIELDS });
+    expect(records).toHaveLength(BIG);
+  });
+
+  test("merges a glob whose files together exceed the spread limit", () => {
+    const half = BIG / 2;
+    for (const name of ["a.ndjson", "b.ndjson"]) {
+      writeFileSync(path.join(tmpDir, name), Array.from({ length: half }, (_, i) => `{"year":${i}}`).join("\n") + "\n");
+    }
+    const records = readInputRecords(path.join(tmpDir, "*.ndjson"), { format: "ndjson", delimiter: ",", fields: FIELDS });
+    expect(records).toHaveLength(BIG);
+  });
+});
+
 describe("countInputRecords", () => {
   test("counts every NDJSON record and its payload bytes, ignoring blank lines", () => {
     const line1 = JSON.stringify({ year: 1999, title: "The Matrix" });

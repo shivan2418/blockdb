@@ -1,5 +1,6 @@
 import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
+import type { OnProgress } from "./progress.js";
 import type { FieldConfig, FieldKind, InputFormat } from "./types.js";
 
 export interface InputReadOptions {
@@ -14,6 +15,11 @@ export interface InputReadOptions {
    * leading sample instead of the whole dataset. Ignored by json/csv/tsv (whole-document formats).
    */
   limit?: number;
+  /**
+   * Reports bytes consumed while reading. Only the streaming (ndjson) path can report incrementally;
+   * whole-document formats report the phase once, since a single `readFileSync` has no midpoint.
+   */
+  onProgress?: OnProgress;
 }
 
 const GLOB_MAGIC = /[*?]/;
@@ -101,12 +107,18 @@ const NDJSON_READ_CHUNK_BYTES = 1 << 20; // 1 MiB
  * multi-byte UTF-8 sequences split across a chunk boundary. `onLine` returns `false` to stop early
  * (e.g. once a sample limit is reached), so callers touch only the head of a huge file.
  */
-function forEachNdjsonLine(filePath: string, onLine: (line: string) => boolean): void {
+function forEachNdjsonLine(
+  filePath: string,
+  onLine: (line: string) => boolean,
+  /** Called once per chunk with the bytes consumed so far — coarse enough (1 MiB) to be free. */
+  onBytes?: (bytesReadSoFar: number) => void,
+): void {
   const fd = openSync(filePath, "r");
   try {
     const decoder = new TextDecoder("utf-8");
     const chunk = Buffer.allocUnsafe(NDJSON_READ_CHUNK_BYTES);
     let pending = "";
+    let consumed = 0;
 
     const handle = (raw: string): boolean => {
       const trimmed = raw.trim();
@@ -119,6 +131,8 @@ function forEachNdjsonLine(filePath: string, onLine: (line: string) => boolean):
         pending += decoder.decode(); // flush any trailing partial multi-byte sequence
         break;
       }
+      consumed += bytesRead;
+      onBytes?.(consumed);
       pending += decoder.decode(chunk.subarray(0, bytesRead), { stream: true });
 
       let newlineIdx: number;
@@ -135,12 +149,20 @@ function forEachNdjsonLine(filePath: string, onLine: (line: string) => boolean):
   }
 }
 
-function readNdjsonRecords(filePath: string, limit?: number): Record<string, unknown>[] {
+function readNdjsonRecords(
+  filePath: string,
+  limit?: number,
+  onBytes?: (bytesReadSoFar: number) => void,
+): Record<string, unknown>[] {
   const records: Record<string, unknown>[] = [];
-  forEachNdjsonLine(filePath, (line) => {
-    records.push(JSON.parse(line) as Record<string, unknown>);
-    return limit === undefined || records.length < limit;
-  });
+  forEachNdjsonLine(
+    filePath,
+    (line) => {
+      records.push(JSON.parse(line) as Record<string, unknown>);
+      return limit === undefined || records.length < limit;
+    },
+    onBytes,
+  );
   return records;
 }
 
@@ -266,6 +288,15 @@ function readDelimitedRecords(
 }
 
 /**
+ * Appends in place. Deliberately NOT `target.push(...source)`: spreading passes each element as a
+ * separate argument, which blows the engine's argument limit ("Maximum call stack size exceeded")
+ * somewhere above ~100k elements — i.e. exactly the dataset sizes this tool exists for.
+ */
+function appendAll<T>(target: T[], source: T[]): void {
+  for (const item of source) target.push(item);
+}
+
+/**
  * Reads and merges records from a single path or glob pattern, per the configured
  * input format and record selector (T9). Same-format files matched by a glob are
  * concatenated in filename order as one dataset.
@@ -276,26 +307,46 @@ export function readInputRecords(inputPathOrGlob: string, opts: InputReadOptions
     throw new Error(`static-shard: no input files matched "${inputPathOrGlob}"`);
   }
 
+  const progress = opts.onProgress;
+  const phase = "reading input";
+  // Total bytes across every matched file, so a glob reports one continuous bar rather than
+  // restarting per file. Only paid for when someone is actually watching.
+  const totalBytes = progress ? files.reduce((sum, file) => sum + statSync(file).size, 0) : 0;
+  let bytesDone = 0;
+
   const records: Record<string, unknown>[] = [];
   for (const file of files) {
     if (opts.limit !== undefined && records.length >= opts.limit) break;
     switch (opts.format) {
       case "ndjson": {
         const remaining = opts.limit === undefined ? undefined : opts.limit - records.length;
-        records.push(...readNdjsonRecords(file, remaining));
+        const fileStart = bytesDone;
+        appendAll(
+          records,
+          readNdjsonRecords(
+            file,
+            remaining,
+            progress && ((soFar) => progress({ phase, done: fileStart + soFar, total: totalBytes, unit: "bytes" })),
+          ),
+        );
         break;
       }
       case "json":
-        records.push(...readJsonRecords(file, opts.recordsPath));
+        appendAll(records, readJsonRecords(file, opts.recordsPath));
         break;
       case "csv":
       case "tsv":
-        records.push(...readDelimitedRecords(file, opts.delimiter, opts.fields));
+        appendAll(records, readDelimitedRecords(file, opts.delimiter, opts.fields));
         break;
       default:
         throw new Error(
           `static-shard: unknown input format "${String(opts.format)}" — expected one of "ndjson", "json", "csv", "tsv"`,
         );
+    }
+    if (progress) {
+      // A whole-document format has no midpoint to report, so its file lands as one step.
+      bytesDone += statSync(file).size;
+      progress({ phase, done: bytesDone, total: totalBytes, unit: "bytes" });
     }
   }
   return records;
