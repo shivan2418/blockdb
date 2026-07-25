@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
@@ -1523,5 +1523,109 @@ describe("seam #1 — warning about text indexes the data can't support", () => 
       inputPath: "shaped.ndjson",
     });
     expect(warnings.join("\n")).not.toMatch(/endsWith|contains/);
+  });
+});
+
+/**
+ * The motivating shape (ADR-0009): a column stored as TEXT because a minority of its values are
+ * domain sentinels, which you nonetheless want to compare numerically. Mirrors Scryfall's `power`,
+ * where 1.6% of values are `*`, `1+*` or `∞` and the rest are ordinary integers.
+ */
+const STATS = [
+  { name: "Grizzly Bears", power: "2", year: 1993 },
+  { name: "Craw Wurm", power: "6", year: 1993 },
+  { name: "Force of Nature", power: "8", year: 1994 },
+  { name: "Lord of the Pit", power: "7", year: 1994 },
+  { name: "Tarmogoyf", power: "*", year: 2007 },
+  { name: "Nameless Race", power: "*", year: 1994 },
+  { name: "Angry Mob", power: "2+*", year: 1994 },
+  { name: "Impervious Greatwurm", power: "16", year: 2018 },
+  { name: "Infinity Elemental", power: "∞", year: 2017 },
+  { name: "Ghalta", power: "12", year: 2018 },
+];
+
+const deriveConfig: StaticShardConfig = {
+  collection: "movies",
+  input: { path: "stats.ndjson" },
+  shardBytes: 90,
+  schema: {
+    sortField: "year",
+    fields: {
+      year: { kind: "number" },
+      name: { kind: "string" },
+      power: { kind: "string", indexed: true },
+      power_num: { kind: "number", indexed: true, absent: true, derive: { from: "power", using: "numeric" } },
+    },
+  },
+};
+
+describe("seam #1 — derived fields (ADR-0009)", () => {
+  beforeEach(() => {
+    writeFileSync(path.join(tmpDir, "stats.ndjson"), STATS.map((s) => JSON.stringify(s)).join("\n") + "\n");
+  });
+
+  test("a derived number column is an ordinary indexed field, earning the range operators its source cannot have", () => {
+    const { manifest } = build(deriveConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+
+    expect(manifest.schema.fields.power_num!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not"]);
+    // The source keeps its own semantics — `equals: "*"` still resolves, ranges still (rightly) don't.
+    expect(manifest.schema.fields.power!.operators).toEqual(["equals", "in", "startsWith", "not"]);
+    expect(manifest.zonemap.power_num).toHaveProperty("pairs");
+  });
+
+  test("the derived values land in the shard payload, and unparseable ones are absent rather than zero", () => {
+    const { outputDir } = build(deriveConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const shardsDir = path.join(outputDir, "shards");
+    const records = readdirSync(shardsDir)
+      .flatMap((file) => readFileSync(path.join(shardsDir, file), "utf8").split("\n").filter(Boolean))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    const byName = new Map(records.map((r) => [r.name as string, r]));
+    expect(byName.get("Grizzly Bears")!.power_num).toBe(2);
+    expect(byName.get("Impervious Greatwurm")!.power_num).toBe(16);
+
+    // A zero here would silently make Tarmogoyf a 0-power creature and pollute every range query.
+    expect("power_num" in byName.get("Tarmogoyf")!).toBe(false);
+    expect("power_num" in byName.get("Angry Mob")!).toBe(false);
+    expect("power_num" in byName.get("Infinity Elemental")!).toBe(false);
+
+    // The printed value survives untouched, so the UI can still render "2+*".
+    expect(byName.get("Angry Mob")!.power).toBe("2+*");
+    expect(byName.get("Tarmogoyf")!.power).toBe("*");
+  });
+
+  test("the generated types expose ranges on the derived field and still refuse them on the source", () => {
+    const { clientOutDir } = build(deriveConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+
+    assertConsumerCompiles(
+      clientOutDir,
+      `
+import { connect } from "./client.js";
+
+const db = connect();
+
+async function valid() {
+  await db.movies.findMany({ where: { power_num: { gte: 7 } } });
+  await db.movies.findMany({ where: { power_num: { gt: 1, lte: 12 } } });
+  // the source column keeps the exact-match query the derived one cannot answer
+  await db.movies.findMany({ where: { power: { equals: "*" } } });
+  // absent: true unlocks the presence operators, which is how you find the unparseable ones
+  await db.movies.findMany({ where: { power_num: { isAbsent: true } } });
+}
+
+async function invalid() {
+  // power is still a string field — lexicographic ranges stay off.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { power: { gte: "7" } } });
+
+  // the derived field is a real number field, so a string bound is a type error.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { power_num: { gte: "7" } } });
+}
+
+void valid;
+void invalid;
+`,
+    );
   });
 });

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { NORMALIZERS, isNormalizerName, normalizerNames } from "./normalize.js";
 import type { Compression, InputFormat, ResolvedConfig, StaticShardConfig } from "./types.js";
 
 const DEFAULT_OUTPUT = "public/shard-data";
@@ -178,6 +179,39 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
       throw new Error(
         `static-shard: field "${name}" declares "tsImport" without "tsType" — the import would name a type nothing uses`,
       );
+    }
+
+    if (field.derive !== undefined) {
+      const { from, using } = field.derive;
+      if (!isNormalizerName(using)) {
+        throw new Error(
+          `static-shard: field "${name}" derives with unknown normalizer "${using}" — available: ${normalizerNames().join(", ")}`,
+        );
+      }
+      if (from === name) {
+        throw new Error(
+          `static-shard: field "${name}" derives from itself. A derived field is a NEW column computed from an existing one — give it a distinct name (e.g. "${name}_num").`,
+        );
+      }
+      const source = config.schema.fields[from];
+      if (source === undefined) {
+        throw new Error(
+          `static-shard: field "${name}" derives from "${from}", which is not declared in schema.fields — declare the source field, or fix the name`,
+        );
+      }
+      // One pass in config order computes every derived field. Chaining would make that order
+      // load-bearing (and admit cycles), for no capability a second explicit field doesn't give.
+      if (source.derive !== undefined) {
+        throw new Error(
+          `static-shard: field "${name}" derives from "${from}", which is itself derived — chaining is not supported. Derive "${name}" from the original source column instead.`,
+        );
+      }
+      const expectedKind = NORMALIZERS[using].outputKind;
+      if (field.kind !== expectedKind) {
+        throw new Error(
+          `static-shard: field "${name}" derives with "${using}", which produces ${expectedKind} values, but declares kind "${field.kind}" — set kind: "${expectedKind}"`,
+        );
+      }
     }
 
     if (field.endsWith || field.contains) {

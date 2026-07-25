@@ -4,6 +4,7 @@ import path from "node:path";
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
 import { resolveConfig } from "./config.js";
 import { generateClientTs, generateSchemaTs } from "./codegen.js";
+import { applyDerivedFields } from "./derive.js";
 import { assertNoSchemaDrift } from "./drift.js";
 import { contentHash } from "./hash.js";
 import { readInputRecords } from "./input.js";
@@ -92,6 +93,12 @@ export function materialize(
   const formatVersion = opts.formatVersion ?? getFormatVersion();
   const sortKind = resolved.fields[resolved.sortField]!.kind as SortKind;
   const progress = opts.onProgress;
+
+  // Before anything reads a field: a derived column has to exist by the time drift checks it, the
+  // sort reads it, and the indexers see it (ADR-0009). Doing it here means `build` and
+  // `inspect --config` derive identically, since both enter through `materialize`.
+  progress?.({ phase: "deriving fields", done: records.length, total: records.length, unit: "count" });
+  applyDerivedFields(records, resolved.fields);
 
   progress?.({ phase: "checking schema", done: records.length, total: records.length, unit: "count" });
   assertNoSchemaDrift(records, resolved.fields);

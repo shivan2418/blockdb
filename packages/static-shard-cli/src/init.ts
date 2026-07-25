@@ -301,6 +301,16 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       }
       fields[name] = cfg;
     }
+
+    // A derived field has no key in the input, so inference cannot see it and would silently delete
+    // it — along with any index built on it (ADR-0009). Carry the whole declaration over verbatim;
+    // it describes a computation, not a shape `--reinfer` could have re-observed. Only dropped when
+    // its source field is gone from the data, where keeping it would fail config validation anyway.
+    for (const [name, priorField] of Object.entries(existing?.schema.fields ?? {})) {
+      if (priorField.derive === undefined || fields[name] !== undefined) continue;
+      if (inferred.fields[priorField.derive.from] === undefined) continue;
+      fields[name] = priorField;
+    }
   } else {
     fields = existing!.schema.fields;
     sortField = opts.sortField ?? existing!.schema.sortField;

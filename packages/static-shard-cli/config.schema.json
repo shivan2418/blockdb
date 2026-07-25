@@ -170,6 +170,23 @@
         "tsImport": {
           "type": "string",
           "description": "A complete import statement emitted verbatim above the generated interface, for whatever `tsType` names (e.g. 'import type { ImageUris } from \"../types/scryfall.js\";'). Requires `tsType`. Identical statements across fields are emitted once."
+        },
+        "derive": {
+          "type": "object",
+          "description": "Compute this field at build time from another field instead of reading it from the input. The result is written into every record before sharding, so it becomes an ORDINARY column — sortable, indexable, typed, with whatever operators its `kind` earns — while the source field is left untouched. Use it to get numeric comparisons on a column stored as text: { kind: 'number', indexed: true, derive: { from: 'power', using: 'numeric' } } gives gt/gte/lt/lte, and `power` still answers equals: '*'. Values the normalizer cannot map are ABSENT on the derived field, never guessed — set absent: true when the source has any.",
+          "properties": {
+            "from": {
+              "type": "string",
+              "description": "The field to read. Must be declared in schema.fields, and must not itself be derived (chaining is rejected)."
+            },
+            "using": {
+              "type": "string",
+              "enum": ["numeric", "lowercase", "trim", "fold"],
+              "description": "The transform to apply. `numeric`: a finite number, or absent (note '' is absent, not 0). `lowercase`: case-folded. `trim`: surrounding whitespace removed. `fold`: case AND diacritics removed, so a plain-ASCII query matches accented text. The transform's output kind must match this field's `kind` — numeric produces number, the rest produce string."
+            }
+          },
+          "required": ["from", "using"],
+          "additionalProperties": false
         }
       },
       "allOf": [

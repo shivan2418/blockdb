@@ -1,3 +1,6 @@
+// Type-only, so nothing circular survives into the emitted JS (normalize.ts imports FieldKind back).
+import type { NormalizerName } from "./normalize.js";
+
 /**
  * How the deploy pre-compresses every file it serves (ADR-0002 §8). `"none"` is the default: most
  * hosts apply `Content-Encoding` themselves, which negotiates per client, whereas a pre-compressed
@@ -70,6 +73,26 @@ export interface FieldConfig {
   tsType?: string;
   /** A complete import statement emitted verbatim above the generated interface, for whatever `tsType` names. Requires `tsType`. */
   tsImport?: string;
+  /**
+   * Computes this field at build time from another field, instead of reading it from the input
+   * (ADR-0009). The result is written into every record before sharding, so it is an ORDINARY column
+   * from that point on — sortable, indexable, typed, and carrying whatever operators its `kind`
+   * earns. The source field is left untouched and stays queryable as-is.
+   *
+   * The motivating case is a column stored as text that you want to compare numerically:
+   * `{ kind: "number", indexed: true, derive: { from: "power", using: "numeric" } }` yields a real
+   * number field with `gt`/`gte`/`lt`/`lte`, while `power` keeps `equals: "*"` working.
+   *
+   * `using` names one of a closed set of domain-free transforms (see `normalize.ts`). Values a
+   * normalizer cannot map are ABSENT on the derived field rather than guessed at, so declare
+   * `absent: true` whenever the source has any.
+   */
+  derive?: {
+    /** The field to read. Must be declared in `schema.fields`, and must not itself be derived. */
+    from: string;
+    /** A normalizer name: `numeric`, `lowercase`, `trim` or `fold`. Its output kind must match this field's `kind`. */
+    using: NormalizerName;
+  };
 }
 
 export interface StaticShardConfig {
