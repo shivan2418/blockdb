@@ -1,4 +1,4 @@
-import { fetchJson } from "./fetch-file.js";
+import { fetchReferencedJson } from "./fetch-file.js";
 import type { IndexChunkFile } from "./secondary-index.js";
 
 export async function fetchIndexChunk(
@@ -7,5 +7,5 @@ export async function fetchIndexChunk(
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<IndexChunkFile> {
-  return (await fetchJson(`${basePath}/${file}`, "referenced", fetchImpl, signal)) as IndexChunkFile;
+  return (await fetchReferencedJson(`${basePath}/${file}`, fetchImpl, signal)) as IndexChunkFile;
 }

@@ -1,3 +1,4 @@
+import { gzipSync } from "node:zlib";
 import { describe, expect, test } from "vitest";
 import { ShardError } from "../src/errors.js";
 import { fetchIndexChunk } from "../src/index-fetch.js";
@@ -49,5 +50,61 @@ describe("fetchIndexChunk", () => {
     expect(error).toBeInstanceOf(ShardError);
     expect((error as ShardError).code).toBe("CORRUPT_DATA");
     expect((error as ShardError).cause).toBeInstanceOf(SyntaxError);
+  });
+});
+
+describe("fetchIndexChunk — build-time gzipped chunks (ADR-0002 §8)", () => {
+  /** A gzipped body must be read as a stream, so it needs a `body`, not `.json()`/`.text()`. */
+  function fakeGzipFetch(url: string, bytes: Uint8Array): typeof fetch {
+    return (async (input: RequestInfo | URL) => {
+      if (String(input) !== url) throw new Error(`fakeGzipFetch: no response registered for ${input}`);
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  const chunk = { entries: [{ prefixLen: 0, suffix: "Gladiator", postings: [1] }] };
+
+  test("a .json.gz path is decompressed — the path itself says how it was built, no manifest flag", async () => {
+    const fetchImpl = fakeGzipFetch("/data/index/title/abc123.json.gz", gzipSync(JSON.stringify(chunk)));
+    expect(await fetchIndexChunk("/data", "index/title/abc123.json.gz", fetchImpl)).toEqual(chunk);
+  });
+
+  test("a plain .json path in the same deploy still reads uncompressed", async () => {
+    const body = JSON.stringify(chunk);
+    const fetchImpl = (async () => ({ ok: true, status: 200, json: async () => JSON.parse(body), text: async () => body }) as Response) as typeof fetch;
+    expect(await fetchIndexChunk("/data", "index/title/abc123.json", fetchImpl)).toEqual(chunk);
+  });
+
+  test("a .json.gz body that isn't valid gzip → CORRUPT_DATA", async () => {
+    const fetchImpl = fakeGzipFetch("/data/index/title/bad.json.gz", new TextEncoder().encode("not gzip"));
+    const error = await fetchIndexChunk("/data", "index/title/bad.json.gz", fetchImpl).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ShardError);
+    expect((error as ShardError).code).toBe("CORRUPT_DATA");
+  });
+
+  test("valid gzip whose payload isn't JSON → CORRUPT_DATA", async () => {
+    const fetchImpl = fakeGzipFetch("/data/index/title/bad.json.gz", gzipSync("{not json"));
+    const error = await fetchIndexChunk("/data", "index/title/bad.json.gz", fetchImpl).then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ShardError);
+    expect((error as ShardError).code).toBe("CORRUPT_DATA");
   });
 });

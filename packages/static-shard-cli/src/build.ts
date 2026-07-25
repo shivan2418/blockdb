@@ -105,10 +105,20 @@ export function materialize(
   const indexFiles: { relPath: string; content: string }[] = [];
   const warnings: string[] = [];
 
+  // Under `gzip`, every manifest-referenced JSON file is written compressed and its path carries the
+  // `.gz` suffix. The path IS the signal the client routes on (`fetchReferencedJson`), so there is no
+  // flag to keep in sync and a tree mixing compressed and plain files still reads correctly.
+  // `indexFiles[].content` stays LOGICAL (uncompressed) — `build` compresses at write time, and
+  // `inspect --config` reports off the same logical bytes a real build would hash.
+  const servedSuffix = resolved.gzip ? ".gz" : "";
+
   const addIndexChunks = (field: string, subdir: string | null, builtChunks: BuiltIndexChunk[]): IndexChunkDirEntry[] =>
     builtChunks.map(({ from, to, content }) => {
+      // Hash over the uncompressed content, exactly as shards do: toggling gzip between rebuilds must
+      // not perturb filenames or the manifest structures keyed on them (ADR-0002 §8).
       const hash = contentHash(content);
-      const relPath = subdir ? `index/${field}/${subdir}/${hash}.json` : `index/${field}/${hash}.json`;
+      const base = subdir ? `index/${field}/${subdir}/${hash}` : `index/${field}/${hash}`;
+      const relPath = `${base}.json${servedSuffix}`;
       indexFiles.push({ relPath, content });
       return { from, to, file: relPath };
     });
@@ -190,7 +200,7 @@ export function materialize(
 
   // Root-manifest budget (ADR-0003 §3): spill the largest secondary zonemaps to per-field
   // sidecars, largest first, until the gzipped root is back under budget.
-  const { manifest, sidecarFiles, warning: budgetWarning } = spillOversizedZonemaps(rawManifest);
+  const { manifest, sidecarFiles, warning: budgetWarning } = spillOversizedZonemaps(rawManifest, servedSuffix);
   indexFiles.push(...sidecarFiles);
   if (budgetWarning) warnings.push(budgetWarning);
 
@@ -275,7 +285,8 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
   for (const { relPath, content } of indexFiles) {
     const filePath = path.join(resolved.output, relPath);
     mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileSync(filePath, content);
+    // The relPath the manifest already points at decides this — see `servedSuffix` in `materialize`.
+    writeFileSync(filePath, relPath.endsWith(".gz") ? gzipSync(content) : content);
     progress?.({ phase: "writing index files", done: ++indexFilesWritten, total: indexFiles.length, unit: "count" });
   }
   // Minified, not pretty-printed: every client downloads this file before it can run a query, and

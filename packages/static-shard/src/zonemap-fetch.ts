@@ -1,4 +1,4 @@
-import { fetchJson } from "./fetch-file.js";
+import { fetchReferencedJson } from "./fetch-file.js";
 import type { PairZonemapEntry } from "./manifest.js";
 
 /**
@@ -13,5 +13,5 @@ export async function fetchZonemapSidecar(
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<PairZonemapEntry> {
-  return (await fetchJson(`${basePath}/${file}`, "referenced", fetchImpl, signal)) as PairZonemapEntry;
+  return (await fetchReferencedJson(`${basePath}/${file}`, fetchImpl, signal)) as PairZonemapEntry;
 }

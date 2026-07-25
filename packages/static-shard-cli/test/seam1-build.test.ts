@@ -133,6 +133,35 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
     expect(existsSync(clientOutDir)).toBe(true);
   });
 
+  test("gzip: true compresses index chunks and zonemap sidecars, and the manifest paths say so", () => {
+    // Separate output dirs: `build` clears its output, so a shared one would wipe the first result.
+    const gz = build(
+      { ...indexedConfig, gzip: true, shardBytes: 60, output: "out-gz", clientOut: "client-gz" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+    const plain = build(
+      { ...indexedConfig, shardBytes: 60, output: "out-plain", clientOut: "client-plain" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+
+    const chunks = gz.manifest.indexes.title!.chunks;
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      // the path carries the encoding — that is what lets the client route without a manifest flag
+      expect(chunk.file).toMatch(/\.json\.gz$/);
+      const onDisk = readFileSync(path.join(gz.outputDir, chunk.file));
+      // really gzip, and it round-trips to the chunk the client expects
+      const decoded = JSON.parse(gunzipSync(onDisk).toString("utf8")) as { entries: unknown[] };
+      expect(Array.isArray(decoded.entries)).toBe(true);
+      expect(onDisk.length).toBeLessThan(gunzipSync(onDisk).length);
+    }
+
+    // Content hashes stay over the LOGICAL uncompressed bytes, so toggling gzip between rebuilds
+    // never perturbs filenames — the same rule shards already follow (ADR-0002 §8).
+    const hashOf = (file: string) => path.basename(file).replace(/\.json(\.gz)?$/, "");
+    expect(chunks.map((c) => hashOf(c.file))).toEqual(plain.manifest.indexes.title!.chunks.map((c) => hashOf(c.file)));
+  });
+
   test("a string sort field range-partitions lexicographically and prunes like any other sort field", () => {
     // ADR-0002 §2 makes the number/date preference a *heuristic for the default*, "never a hidden
     // decision" — and locality on the field users actually search is the whole point of the choice.

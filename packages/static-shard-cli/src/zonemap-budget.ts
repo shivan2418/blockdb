@@ -52,7 +52,7 @@ function isPairEntry(entry: ZonemapEntry): entry is PairZonemapEntry {
  * has been spilled (ADR-0003 §3) — the `O(shards × fields)` root-manifest failure mode. The sort
  * field's own zonemap (split-points) is never spilled: it routes every query and must stay in root.
  */
-export function spillOversizedZonemaps(manifest: Manifest): ZonemapSpillResult {
+export function spillOversizedZonemaps(manifest: Manifest, servedSuffix = ""): ZonemapSpillResult {
   if (manifestGzipBytes(manifest) <= MANIFEST_BUDGET_BYTES) {
     return { manifest, sidecarFiles: [] };
   }
@@ -71,7 +71,8 @@ export function spillOversizedZonemaps(manifest: Manifest): ZonemapSpillResult {
 
     const { field, entry } = candidates[0]!;
     const content = JSON.stringify(entry);
-    const relPath = `zonemap/${field}-${contentHash(content)}.json`;
+    // Hash over the uncompressed content; `servedSuffix` marks how `build` will write it (ADR-0002 §8).
+    const relPath = `zonemap/${field}-${contentHash(content)}.json${servedSuffix}`;
     sidecarFiles.push({ relPath, content });
 
     current = { ...current, zonemap: { ...current.zonemap, [field]: { sidecar: relPath } } };

@@ -119,6 +119,25 @@ export async function fetchGzippedText(
   }
 }
 
+/**
+ * Fetch + JSON-parse a manifest-referenced file, decompressing first when the path says it was
+ * built gzipped (ADR-0002 §8).
+ *
+ * Index chunks and zonemap sidecars are referenced from the manifest **by full path**, so the `.gz`
+ * suffix is all the signal needed — no manifest flag to keep in sync, and a tree holding a mix of
+ * compressed and plain files still reads correctly. That matters because content-hashed filenames
+ * mean a rebuild replaces only the files whose contents changed.
+ */
+export async function fetchReferencedJson(
+  url: string,
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  if (!url.endsWith(".gz")) return await fetchJson(url, "referenced", fetchImpl, signal);
+  const text = await fetchGzippedText(url, "referenced", fetchImpl, signal);
+  return parseCorruptible(url, () => JSON.parse(text) as unknown);
+}
+
 /** Parse/decode a 2xx body's CONTENT into a domain structure; failures are CORRUPT_DATA. */
 export function parseCorruptible<T>(url: string, parse: () => T): T {
   try {
