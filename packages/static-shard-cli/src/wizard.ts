@@ -374,6 +374,19 @@ export function sortFieldLocality(
   return out;
 }
 
+/** Mean serialized size of a field's values — what one split-point costs in the always-downloaded manifest. */
+function averageValueBytes(records: Record<string, unknown>[], field: string): number {
+  let bytes = 0;
+  let seen = 0;
+  for (const record of records) {
+    const value = record[field];
+    if (value === null || value === undefined) continue;
+    bytes += typeof value === "string" ? value.length : String(value).length;
+    seen++;
+  }
+  return seen === 0 ? 0 : bytes / seen;
+}
+
 /**
  * The sort field to recommend once the user has said what they filter on. Ranked by measured
  * locality, with one guard ahead of it: a candidate whose value runs are long enough to trip
@@ -394,6 +407,12 @@ export function recommendedSortFieldFor(data: WizardData, state: WizardState, sh
   return scored.sort((a, b) => {
     if (skews(a) !== skews(b)) return skews(a) ? 1 : -1;
     if (locality[a]!.mean !== locality[b]!.mean) return locality[a]!.mean - locality[b]!.mean;
+    // Equal locality happens for real: a field and a URL derived 1:1 from it partition identically
+    // (`set` and `scryfall_set_uri` both have 1047 values on Scryfall). Prefer the cheaper one, because
+    // split-points store the sort field's RAW values in the manifest every client downloads — measured
+    // over 491 shards, `set` costs 1.7 KB there and `scryfall_set_uri` 21.4 KB for the same pruning.
+    const bytesDiff = averageValueBytes(data.records, a) - averageValueBytes(data.records, b);
+    if (Math.abs(bytesDiff) > 0.5) return bytesDiff;
     const cardDiff = byName.get(b)!.cardinality - byName.get(a)!.cardinality;
     return cardDiff !== 0 ? cardDiff : a < b ? -1 : 1;
   })[0]!;

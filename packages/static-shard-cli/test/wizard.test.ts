@@ -566,6 +566,24 @@ describe("stage order — what you filter on is asked BEFORE the sort field", ()
     expect(state.sortField).toBe("region");
   });
 
+  test("between two candidates that partition identically, prefers the one with cheaper split-points", () => {
+    // Real shape: `set` and `scryfall_set_uri` on Scryfall are 1:1, so they cluster everything exactly
+    // alike — but split-points store the sort field's raw values in the manifest every client
+    // downloads, where the codes cost 1.7 KB over 491 shards and the URLs cost 21.4 KB.
+    const rows = Array.from({ length: 240 }, (_, i) => {
+      const code = `s${String(Math.floor(i / 12)).padStart(2, "0")}`;
+      return { id: `r${String(i).padStart(3, "0")}`, code, code_uri: `https://example.com/api/sets/${code}?utm_source=api` };
+    });
+    const data = buildWizardData(rows);
+    let state = atStage(data, FILTER_STAGE);
+    state = { ...state, indexedFields: new Set(["code"]), shardBytes: 4096 };
+    state = applyKey(data, state, { type: "right" });
+
+    const loc = estimateForState(data, state).locality;
+    expect(loc.code!.mean).toBeCloseTo(loc.code_uri!.mean, 5); // identical partitioning
+    expect(state.sortField).toBe("code"); // ...so the tiebreak is what it costs to route on
+  });
+
   test("a fully-unique field carries no locality signal and cannot skew the ranking", () => {
     // Every `sku` occurs once, so it sits in one bin under any ordering — measuring against it would
     // report every candidate as equally good.

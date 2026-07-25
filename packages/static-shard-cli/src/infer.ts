@@ -12,6 +12,16 @@ const ID_LIKE_NAME_RE = /(^_?id$)|([._-]?id$)/i;
 const DEFAULT_MAX_INDEXED = 3;
 
 /**
+ * Average records per distinct value below which a field stops behaving like a facet and starts
+ * behaving like an identifier. Keeps the default indexed set on fields that actually group records:
+ * on 116k Scryfall cards this admits `type_line`, `artist` and `set` while excluding near-unique
+ * columns whose index would hold roughly one entry per record.
+ */
+const MIN_RECORDS_PER_FACET_VALUE = 10;
+/** Below this many records the facet band is meaningless (a ratio of a handful rounds to nothing), so only uniqueness is judged. */
+const MIN_RECORDS_FOR_FACET_BAND = 100;
+
+/**
  * A string field with at most this many distinct values is treated as enum-like, and its values are
  * baked into the config so codegen can emit a value union (MTG colours, a rarity, a status).
  * Deliberately conservative: it should catch closed sets and miss fields that merely *happen* to be
@@ -193,9 +203,25 @@ function recommendIndexedFields(fields: Record<string, InferredField>, recordCou
   // Multi-valued fields can only be declared correctly when indexed (T7 constraint) — always include them.
   const forced = entries.filter(([, f]) => f.multi).map(([name]) => name);
 
+  // DESCENDING cardinality, within a facet-shaped band. Ascending picked the least selective fields
+  // available — on a real 116k-record dataset the three winners were all two-value booleans
+  // (`highres_image`, `reserved`, `game_changer`) while `set` (1047), `artist` (2524) and `type_line`
+  // (4937) went unindexed. That also contradicted ADR-0003 §6 step 4, which uses higher cardinality as
+  // the selectivity proxy precisely because it prunes harder.
+  //
+  // The band matters in both directions: a value shared by fewer than MIN_RECORDS_PER_FACET_VALUE
+  // records on average is identifier-shaped, not a facet, and indexing it buys a per-value index entry
+  // for almost no grouping.
+  // The band needs enough records to mean anything: on a 5-record sample `recordCount / 10` is 0 and
+  // would reject every field. Below the threshold, "not unique" is the only claim the data supports.
+  const maxFacetCardinality =
+    recordCount >= MIN_RECORDS_FOR_FACET_BAND ? Math.floor(recordCount / MIN_RECORDS_PER_FACET_VALUE) : recordCount - 1;
   const categorical = entries
-    .filter(([, f]) => f.kind !== "json" && !f.multi && f.cardinality > 1 && f.cardinality < recordCount)
-    .sort(([nameA, a], [nameB, b]) => (a.cardinality !== b.cardinality ? a.cardinality - b.cardinality : nameA < nameB ? -1 : 1))
+    .filter(
+      ([, f]) =>
+        f.kind !== "json" && !f.multi && f.cardinality > 1 && f.cardinality <= maxFacetCardinality,
+    )
+    .sort(([nameA, a], [nameB, b]) => (a.cardinality !== b.cardinality ? b.cardinality - a.cardinality : nameA < nameB ? -1 : 1))
     .slice(0, DEFAULT_MAX_INDEXED)
     .map(([name]) => name);
 

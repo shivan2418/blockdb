@@ -338,3 +338,37 @@ describe("inferSchema — progress reporting", () => {
     );
   });
 });
+
+describe("inferSchema — default indexed set is facet-shaped, not merely small", () => {
+  test("prefers the most selective grouping fields, not two-value booleans", () => {
+    // Ascending cardinality picked the least useful filters available: on 116k real records the three
+    // winners were all two-value booleans while `set`, `artist` and `type_line` went unindexed. That
+    // also contradicted ADR-0003 §6 step 4, which treats higher cardinality as the pruning proxy.
+    const records = Array.from({ length: 600 }, (_, i) => ({
+      id: `r${i}`,
+      rank: i,
+      flag: i % 2 === 0,          // 2 distinct — cheap, and useless as a filter
+      tier: `t${i % 4}`,          // 4 distinct
+      family: `f${i % 60}`,       // 60 distinct — the best real facet
+      label: `l${i % 20}`,        // 20 distinct
+      serial: `s${i}`,            // unique — an identifier, never a facet
+    }));
+    const indexed = inferSchema(records).indexedFields;
+
+    expect(indexed).toContain("family");
+    expect(indexed).toContain("label");
+    expect(indexed).not.toContain("flag");
+    // and never an identifier-shaped column, however it is ranked
+    expect(indexed).not.toContain("serial");
+  });
+
+  test("falls back to plain not-unique on a sample too small for the facet band to mean anything", () => {
+    // recordCount / 10 rounds to zero on a handful of records, which would reject every field.
+    const records = [
+      { id: "p1", category: "electronics", price: 100 },
+      { id: "p2", category: "electronics", price: 200 },
+      { id: "p3", category: "books", price: 15 },
+    ];
+    expect(inferSchema(records).indexedFields).toContain("category");
+  });
+});
