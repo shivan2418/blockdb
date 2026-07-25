@@ -364,13 +364,16 @@ async function findManyByShardWalk(
   candidateIndices: number[],
   args: RawFindManyArgs,
   direction: "asc" | "desc",
-): Promise<{ records: Record<string, unknown>[]; hasMore: boolean }> {
+): Promise<{ records: Record<string, unknown>[]; hasMore: boolean; total?: number }> {
   const limit = args.limit!;
   const offset = args.offset ?? 0;
   const needed = offset + limit + 1;
   const order = direction === "asc" ? candidateIndices : [...candidateIndices].reverse();
 
   const matches: Record<string, unknown>[] = [];
+  // How many candidates the walk actually read. Pruning is conservative — every match lives in a
+  // candidate — so reading all of them means `matches` IS the whole match set and its size is exact.
+  let read = 0;
   for (let i = 0; i < order.length && matches.length < needed; i += SHARD_WALK_BATCH) {
     const batch = order.slice(i, i + SHARD_WALK_BATCH);
     const fetched = await Promise.all(batch.map((index) => fetchShardAt(manifest, ctx, index)));
@@ -381,10 +384,16 @@ async function findManyByShardWalk(
         if (matchesWhere(record, args.where)) matches.push(record);
       }
     }
+    read += batch.length;
   }
 
   const windowed = matches.slice(offset);
-  return { records: windowed.slice(0, limit), hasMore: windowed.length > limit };
+  return {
+    records: windowed.slice(0, limit),
+    hasMore: windowed.length > limit,
+    // Stopping early is the walk's whole point, and it means the tail was never seen — no total then.
+    ...(read === order.length ? { total: matches.length } : {}),
+  };
 }
 
 async function executeFindMany(
@@ -392,7 +401,7 @@ async function executeFindMany(
   ctx: FetchContext,
   args: RawFindManyArgs | undefined,
   maxResults: number,
-): Promise<{ records: Record<string, unknown>[]; hasMore: boolean }> {
+): Promise<{ records: Record<string, unknown>[]; hasMore: boolean; total?: number }> {
   const candidateIndices = await candidateIndicesForWhere(manifest, ctx, args?.where);
 
   const walkDirection = shardWalkDirection(manifest, args);
@@ -432,12 +441,15 @@ async function executeFindMany(
     matches = [...matches].sort((a, b) => compareByOrderBy(a, b, orderBy));
   }
 
+  // This path read every candidate shard, so `matches` is the complete match set — the exact total
+  // comes for free, even when only one page of it is returned.
+  const total = matches.length;
   const offset = args?.offset ?? 0;
   const windowed = matches.slice(offset);
   if (args?.limit === undefined) {
-    return { records: windowed, hasMore: false };
+    return { records: windowed, hasMore: false, total };
   }
-  return { records: windowed.slice(0, args.limit), hasMore: windowed.length > args.limit };
+  return { records: windowed.slice(0, args.limit), hasMore: windowed.length > args.limit, total };
 }
 
 export function createClient<S extends SchemaMeta, Records>(

@@ -52,9 +52,25 @@ An approximate `count()` cannot answer "are there more than N?" exactly. That jo
 - With no `limit`, `findMany` returns all matches up to `maxResults` (throws `LIMIT_EXCEEDED` beyond — ADR-0007) and `hasMore: false`. `offset` composes (`offset + limit + 1`).
 - Clean split of the two pagination questions: **`hasMore` answers "next page?" exactly and cheaply; `count()` answers "how many pages?" approximately.**
 
+### 5a. `findMany` — exact `total` whenever the query already saw every match (amendment)
+
+The split above is right about `count()` but too pessimistic about `findMany`, which frequently ends up holding the entire match set and then discards its size. Where that happens the exact total is free, so `findMany` returns **`{ records: T[]; hasMore: boolean; total?: number }`**.
+
+`total` is present iff every candidate shard was read — pruning is conservative, so "all candidates read" means "all matches seen":
+
+- **any `orderBy` on a non-sort field** — the ordering cannot be decided without materializing all matches, so this path always knew the total;
+- **no `limit`** — every match is returned anyway;
+- **a shard walk that ran out of candidates** before it accumulated `offset + limit + 1`.
+
+It is absent exactly when the walk stopped early, which is precisely when the tail was never fetched. No fetch is ever added to produce it: `total` appears when it is already known and is omitted rather than estimated.
+
+`total` is **not** `offset + records.length` — on a page past the end that formula yields the offset. It is a property of the match set, not of the window taken from it, which is why the engine has to report it rather than the caller deriving it.
+
+Consumers should prefer `total` over `count()` whenever it is present. `count()`'s zero-fetch bound can be an order of magnitude high (measured: 35,739 against a true 396 for a `contains` filter on a 116k-record dataset), and displaying it as "about N" next to an exactly-known page range is a worse answer than the one already in hand.
+
 ## Consequences
 
-- **Refines ADR-0001 (T2):** `count(args) → { count, exact }` (input `opts?: { exact?: false }` reserved); `findMany(args) → { records, hasMore }`.
+- **Refines ADR-0001 (T2):** `count(args) → { count, exact }` (input `opts?: { exact?: false }` reserved); `findMany(args) → { records, hasMore, total? }` (§5a).
 - **Refines ADR-0003 (T4):** documents the zero-fetch upper-bound algorithm and confirms **no index-format change**; records the v2 shard-sampling CI estimator as the intended exact-mode design (still no posting-shape change).
 - **Feeds T5 (codegen):** emit the `{ count, exact }` and `{ records, hasMore }` return types and the compile-time-locked `exact?: false` option; no runtime statistics ship in 1.0 (runtime stays zero-dep).
 - Consistent with T8: no silent lies — the type system refuses `exact: true`, positive counts are honestly flagged `exact: false`, and `count === 0`/`hasMore` are the two reliable signals.

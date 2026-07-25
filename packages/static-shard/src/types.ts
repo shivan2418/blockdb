@@ -210,6 +210,20 @@ export interface FindManyArgs<C extends CollectionMeta, W extends WhereOf<C>> {
 export interface FindManyResult<Rec> {
   records: Rec[];
   hasMore: boolean;
+  /**
+   * The EXACT number of records matching `where`, present only when answering the query already
+   * required seeing all of them (refines ADR-0008 §5). Free when it appears — the engine had the
+   * match set in hand and would otherwise have discarded its size.
+   *
+   * Present when every candidate shard was read: any `orderBy` on a non-sort field (ordering can't be
+   * decided without them), no `limit`, or a shard walk that ran out of candidates before it filled the
+   * page. Absent when the walk stopped early, which is exactly when the engine has NOT seen the tail.
+   *
+   * Prefer this over `count()` whenever it is present: `count()` is a zero-fetch upper bound that can
+   * be an order of magnitude high, while this is the truth. It is not `offset + records.length` — on a
+   * page past the end that formula returns the offset, not the total.
+   */
+  total?: number;
 }
 
 /**

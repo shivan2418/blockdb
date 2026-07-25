@@ -322,6 +322,63 @@ describe("seam #2 — count() approximate upper bound & pagination totals (T4), 
   });
 });
 
+describe("seam #2 — findMany's exact total, when the query already saw every match (refines ADR-0008 §5)", () => {
+  /** All four cases run against one client — the point is which queries can report a total, not the tree. */
+  async function movieClient(requests: string[]) {
+    const { outputDir, clientOutDir } = build(indexedConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const schema = await loadGeneratedSchema(clientOutDir);
+    return createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
+      basePath: outputDir,
+      fetch: diskFetch(requests),
+    });
+  }
+
+  test("an orderBy on a non-sort field materializes every match to sort it, so the total is exact even on a first page that hasMore", async () => {
+    const client = await movieClient([]);
+    // rating is not the sort field, so ordering can only be decided after every candidate is fetched —
+    // which means the engine is already holding the whole match set.
+    const result = await client.movies.findMany({ orderBy: { rating: "desc" }, limit: 3 });
+    expect(result.records).toHaveLength(3);
+    expect(result.hasMore).toBe(true);
+    expect(result.total).toBe(MOVIES.length);
+  });
+
+  test("a shard walk that exhausts its candidates reports an exact total, where count() can only claim a bound", async () => {
+    const client = await movieClient([]);
+    const where = { rating: { gte: 8.5 } } as const;
+    const truth = MOVIES.filter((m) => m.rating >= 8.5).length;
+
+    // limit above the match count, so the walk runs out of candidates before it runs out of need.
+    const result = await client.movies.findMany({ where, limit: 50 });
+    expect(result.hasMore).toBe(false);
+    expect(result.total).toBe(truth);
+
+    // Same where, same truth — count() reports a bound it cannot vouch for, findMany reports the number.
+    const approximate = await client.movies.count(where);
+    expect(approximate.exact).toBe(false);
+    expect(approximate.count).toBeGreaterThanOrEqual(truth);
+  });
+
+  test("a walk that stops early reports no total rather than guessing one", async () => {
+    const client = await movieClient([]);
+    // No orderBy + a small limit is the walk's whole purpose: stop as soon as the page is filled.
+    const result = await client.movies.findMany({ limit: 2 });
+    expect(result.records).toHaveLength(2);
+    expect(result.hasMore).toBe(true);
+    expect(result.total).toBeUndefined();
+  });
+
+  test("an offset past the end still reports the true total, not the offset", async () => {
+    const client = await movieClient([]);
+    const result = await client.movies.findMany({ limit: 5, offset: 50 });
+    expect(result.records).toEqual([]);
+    expect(result.hasMore).toBe(false);
+    // The naive `offset + records.length` would say 50 here. The total is a property of the match
+    // set, not of the window taken out of it.
+    expect(result.total).toBe(MOVIES.length);
+  });
+});
+
 /** T6 fixture: same movies, title opted into endsWith (reversed) + contains (trigram). */
 const t6Config: StaticShardConfig = {
   ...config,
