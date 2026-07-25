@@ -306,3 +306,35 @@ describe("inferSchema — default indexed-set recommendation", () => {
     expect(inferSchema(records).indexedFields).toContain("genres");
   });
 });
+
+describe("inferSchema — progress reporting", () => {
+  const records = Array.from({ length: 50 }, (_, i) => ({
+    id: `r${i}`,
+    year: 2000 + i,
+    title: `t${i}`,
+    tier: i % 2 === 0 ? "gold" : "silver",
+  }));
+
+  test("reports advancing per-field progress, not one static line", () => {
+    // Inference is O(records x fields) and is the long silence after the read bar finishes — on a
+    // 532 MB input it is 6.6s of a 10s init. Per-field events are what make it visibly advance.
+    const events: { phase: string; done?: number; total?: number }[] = [];
+    inferSchema(records, { onProgress: (e) => events.push({ phase: e.phase, done: e.done, total: e.total }) });
+
+    expect(events.length).toBeGreaterThan(1);
+    for (const e of events) {
+      expect(e.phase).toMatch(/inferring/i);
+      expect(e.total).toBe(4); // id, year, title, tier
+    }
+    // strictly advancing, and it reaches the end
+    const done = events.map((e) => e.done ?? -1);
+    expect(done).toEqual([...done].sort((a, b) => a - b));
+    expect(done[done.length - 1]).toBe(4);
+  });
+
+  test("works, and infers identically, with no reporter supplied", () => {
+    expect(inferSchema(records)).toEqual(
+      inferSchema(records, { onProgress: () => {} }),
+    );
+  });
+});

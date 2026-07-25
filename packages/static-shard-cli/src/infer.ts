@@ -1,4 +1,5 @@
 import { SORTABLE_KINDS, type SortableKind } from "./config.js";
+import type { OnProgress } from "./progress.js";
 import type { FieldKind } from "./types.js";
 
 /** ISO-8601 date/date-time, e.g. "1999-03-31" or "2000-05-05T00:00:00Z" (ADR-0001: date = string + isDate). */
@@ -206,17 +207,25 @@ function recommendIndexedFields(fields: Record<string, InferredField>, recordCou
  * site (ADR-0005 §4). Pure: no I/O, no defaults from config — `init` layers flags/existing-file
  * precedence on top of this recommendation.
  */
-export function inferSchema(records: Record<string, unknown>[]): InferenceResult {
+export function inferSchema(
+  records: Record<string, unknown>[],
+  opts: { onProgress?: OnProgress } = {},
+): InferenceResult {
   const recordCount = records.length;
   const fieldNames = new Set<string>();
   for (const record of records) {
     for (const key of Object.keys(record)) fieldNames.add(key);
   }
 
+  // Per field, not one event for the whole pass: this is O(records x fields) and, once inference reads
+  // the entire input by default, it is the longest silence in `init` — 6.6s of a 10s run on a 532 MB
+  // file, all of it after the read bar has already finished. Per-field events make it visibly advance.
   const fields: Record<string, InferredField> = {};
+  let inferred = 0;
   for (const name of fieldNames) {
     const presentValues = records.filter((r) => Object.prototype.hasOwnProperty.call(r, name)).map((r) => r[name]);
     fields[name] = inferField(name, presentValues, recordCount);
+    opts.onProgress?.({ phase: `inferring schema (${name})`, done: ++inferred, total: fieldNames.size, unit: "count" });
   }
 
   const sortField = recommendSortField(fields, recordCount);

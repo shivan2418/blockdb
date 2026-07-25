@@ -14,6 +14,7 @@ import { inferSchema, isSortFieldCandidate } from "./infer.js";
 import { compareSortValues, type SortKind } from "./sort.js";
 import { valuesOf } from "./secondary-index.js";
 import type { PopulationStats } from "./input.js";
+import type { OnProgress } from "./progress.js";
 import { lowCardinalitySortFieldWarning, oversizedRecordWarning } from "./warnings.js";
 import type { FieldConfig, FieldKind } from "./types.js";
 
@@ -91,12 +92,16 @@ export interface WizardData {
  * existing baked schema interactively is out of scope for T12 (already served by `init --yes` without
  * `--reinfer`).
  */
-export function buildWizardData(records: Record<string, unknown>[], population?: PopulationStats): WizardData {
+export function buildWizardData(
+  records: Record<string, unknown>[],
+  population?: PopulationStats,
+  opts: { onProgress?: OnProgress } = {},
+): WizardData {
   if (records.length === 0) {
     throw new Error("static-shard: the wizard found no records in the input to infer a schema from");
   }
   // Inference sees every record it was given; only the estimate sample below is capped.
-  const inferred = inferSchema(records);
+  const inferred = inferSchema(records, opts);
   const fields: WizardField[] = Object.entries(inferred.fields)
     .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

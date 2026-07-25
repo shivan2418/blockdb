@@ -1,6 +1,6 @@
 import readline from "node:readline";
 import path from "node:path";
-import { DEFAULT_SAMPLE_SIZE, init, resolveInitConfig, sampleRecords, type InitOptions, type InitResult } from "./init.js";
+import { init, resolveInitConfig, sampleLimit, sampleRecords, type InitOptions, type InitResult } from "./init.js";
 import { countInputRecords, readInputRecords, type PopulationStats } from "./input.js";
 import type { ProgressReporter } from "./progress.js";
 import {
@@ -131,8 +131,9 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
   const progress = opts.progress;
   const allRecords = readInputRecords(resolvedInput, {
     ...readOpts,
-    // Sampled inference only needs the leading records; a full scan reads everything.
-    limit: opts.fullScan ? undefined : (opts.sampleSize ?? DEFAULT_SAMPLE_SIZE),
+    // Shares `sampleLimit` with `init` rather than restating the rule — the two paths must read the
+    // same records or the wizard's recommendations drift from what `init --yes` would have written.
+    limit: sampleLimit(opts),
     ...(progress ? { onProgress: progress.report } : {}),
   });
   const sample = sampleRecords(allRecords, opts);
@@ -142,8 +143,8 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
   const population: PopulationStats = opts.fullScan
     ? { recordCount: allRecords.length, datasetBytes: allRecords.reduce((s, r) => s + Buffer.byteLength(JSON.stringify(r), "utf8"), 0) }
     : countInputRecords(resolvedInput, { ...readOpts, ...(progress ? { onProgress: progress.report } : {}) });
-  progress?.report({ phase: "inferring schema", done: sample.length, unit: "count" });
-  const data: WizardData = buildWizardData(sample, population);
+  // `buildWizardData` reports per field from here on (inference is the long pole on a full scan).
+  const data: WizardData = buildWizardData(sample, population, ...(progress ? [{ onProgress: progress.report }] : []));
   // Loading done — clear the bar before the TUI takes over the screen.
   progress?.finish();
 
