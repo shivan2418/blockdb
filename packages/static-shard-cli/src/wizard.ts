@@ -272,6 +272,21 @@ export function applyKey(data: WizardData, state: WizardState, key: WizardKey): 
       set.has(row.field) ? set.delete(row.field) : set.add(row.field);
       return { ...state, [target]: set };
     }
+    // Like stage 2, both act on the currently-visible (query-narrowed) rows. Rows here are
+    // (field × operator) pairs, so narrowing to one field then selecting-all enables both of that
+    // field's operators — and selecting all with no query on enables every operator everywhere,
+    // which the live per-row cost and the `contains`-exceeds-column warning are there to price.
+    if (key.type === "select-all" || key.type === "invert") {
+      const endsWithFields = new Set(state.endsWithFields);
+      const containsFields = new Set(state.containsFields);
+      for (const row of rows) {
+        const set = row.operator === "endsWith" ? endsWithFields : containsFields;
+        if (key.type === "select-all") set.add(row.field);
+        else if (set.has(row.field)) set.delete(row.field);
+        else set.add(row.field);
+      }
+      return { ...state, endsWithFields, containsFields };
+    }
     if (key.type === "char") return { ...state, filterQuery: state.filterQuery + key.value, cursor: 0 };
     if (key.type === "backspace") return { ...state, filterQuery: state.filterQuery.slice(0, -1), cursor: 0 };
     return state;
@@ -613,7 +628,12 @@ function renderTextSearch(data: WizardData, state: WizardState, estimate: Wizard
   ];
   const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
   const noMatchLine = allRows.length === 0 ? [dim("  no indexed text fields yet — go back and index one first")] : [];
-  const footer = ["", ...estimateAxes(estimate.costs).extraIndexes, "", dim("  [↑/↓] move  [space] toggle  [type] filter  [←/→] change step")];
+  const footer = [
+    "",
+    ...estimateAxes(estimate.costs).extraIndexes,
+    "",
+    dim("  [↑/↓] move  [space] toggle  [ctrl+a] select all  [tab] invert  [type] filter  [←/→] change step"),
+  ];
   const chromeLines = header.length + filterLine.length + noMatchLine.length + footer.length;
 
   const { items, offset } = windowed(allRows, state.cursor, visibleRowsFor(terminalRows, chromeLines));

@@ -270,6 +270,49 @@ describe("applyKey — text search step", () => {
     expect(state.endsWithFields.has(firstEligible)).toBe(true);
   });
 
+  test("select-all enables both operators on every visible field", () => {
+    const data = buildWizardData(PRODUCTS);
+    let state = toStage3WithIndexedStrings(data);
+    state = applyKey(data, state, { type: "select-all" });
+    for (const name of ["category", "name", "description"]) {
+      expect(state.endsWithFields.has(name)).toBe(true);
+      expect(state.containsFields.has(name)).toBe(true);
+    }
+    // never leaks onto the sort field or a non-indexed field
+    expect(state.endsWithFields.has(state.sortField)).toBe(false);
+    expect(state.containsFields.has("id")).toBe(false);
+  });
+
+  test("select-all is scoped to the active type-to-filter query", () => {
+    const data = buildWizardData(PRODUCTS);
+    let state = toStage3WithIndexedStrings(data);
+    state = applyKey(data, state, { type: "char", value: "d" }); // matches "description" only
+    state = applyKey(data, state, { type: "select-all" });
+    expect(state.endsWithFields.has("description")).toBe(true);
+    expect(state.containsFields.has("description")).toBe(true);
+    expect(state.endsWithFields.has("category")).toBe(false);
+    expect(state.containsFields.has("name")).toBe(false);
+  });
+
+  test("invert flips each visible row's operator independently, and round-trips", () => {
+    const data = buildWizardData(PRODUCTS);
+    let state = toStage3WithIndexedStrings(data);
+    // seed a mixed starting state: category has endsWith only, name has contains only
+    state = { ...state, endsWithFields: new Set(["category"]), containsFields: new Set(["name"]) };
+
+    state = applyKey(data, state, { type: "invert" });
+    expect(state.endsWithFields.has("category")).toBe(false); // was on → off
+    expect(state.containsFields.has("category")).toBe(true); // was off → on
+    expect(state.containsFields.has("name")).toBe(false); // was on → off
+    expect(state.endsWithFields.has("name")).toBe(true); // was off → on
+    expect(state.endsWithFields.has("description")).toBe(true);
+    expect(state.containsFields.has("description")).toBe(true);
+
+    state = applyKey(data, state, { type: "invert" });
+    expect([...state.endsWithFields].sort()).toEqual(["category"]);
+    expect([...state.containsFields].sort()).toEqual(["name"]);
+  });
+
   test("a `contains` index estimated bigger than its own column surfaces as a warning and renders red", () => {
     // "description" is long free text with high per-value entropy relative to a tiny 5-record sample —
     // its trigram index is expected to dwarf the raw column at this scale.
