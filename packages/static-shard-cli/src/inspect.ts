@@ -177,7 +177,7 @@ function inspectConfig(configPath: string): InspectReport {
   });
 
   const { manifest, indexFiles } = materialize(resolved, records);
-  const manifestJson = JSON.stringify(manifest, null, 2); // same serialization `build` writes to disk (build.ts)
+  const manifestJson = JSON.stringify(manifest); // same serialization `build` writes to disk (build.ts)
 
   const chunkContent = new Map(indexFiles.map((f) => [f.relPath, f.content]));
   const readChunk = (relPath: string): string => {
