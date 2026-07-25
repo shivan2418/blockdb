@@ -207,6 +207,32 @@ describe("applyKey — filter fields step", () => {
     expect(defaultScreen).toBe(checklistRowCount(24));
   });
 
+  test("payload-only json fields are never offered as filterable, and their absence is explained", () => {
+    const nested = [
+      { id: "p1", price: 100, category: "a", prices: { usd: "1.50" } },
+      { id: "p2", price: 200, category: "b", prices: { usd: "2.00" } },
+      { id: "p3", price: 300, category: "c", prices: { usd: "3.00" } },
+    ];
+    const data = buildWizardData(nested);
+    expect(data.fields.find((f) => f.name === "prices")!.kind).toBe("json");
+
+    const state = toStage2(data);
+    const rendered = renderFrame(data, state, estimateForState(data, state));
+    const checklist = rendered.split("\n").filter((l) => l.includes("[x]") || l.includes("[ ]"));
+    expect(checklist.some((l) => l.includes("category"))).toBe(true);
+    expect(checklist.some((l) => l.includes("prices"))).toBe(false);
+    expect(rendered).toContain("not filterable");
+
+    // and it can't be reached by walking the cursor either — the invalid state is unreachable
+    for (let i = 0; i < 20; i++) {
+      const s = applyKey(data, { ...state, cursor: i }, { type: "space" });
+      expect(s.indexedFields.has("prices")).toBe(false);
+    }
+    // nor by select-all / invert
+    expect(applyKey(data, state, { type: "select-all" }).indexedFields.has("prices")).toBe(false);
+    expect(applyKey(data, state, { type: "invert" }).indexedFields.has("prices")).toBe(false);
+  });
+
   test("the first-download figure carries a budget meter that fills as the manifest grows", () => {
     const data = buildWizardData(PRODUCTS);
     const state = toStage2(data);

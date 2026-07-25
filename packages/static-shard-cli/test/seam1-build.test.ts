@@ -852,6 +852,98 @@ describe("seam #1 — init --yes → build (T10)", () => {
   });
 });
 
+describe("seam #1 — asking to index a payload-only json field degrades gracefully", () => {
+  // `prices` is a nested object, so inference makes it payload-only kind "json" — it can be
+  // returned but never filtered on. Asking to index it must not cost the user the whole config.
+  const NESTED = [
+    { id: "p1", category: "electronics", price: 100, name: "Widget", prices: { usd: "1.50" } },
+    { id: "p2", category: "electronics", price: 200, name: "Gadget", prices: { usd: "2.00" } },
+    { id: "p3", category: "books", price: 15, name: "Novel", prices: { usd: "3.00", eur: "2.80" } },
+  ];
+
+  function writeNested(dir: string): void {
+    writeFileSync(path.join(dir, "nested.ndjson"), NESTED.map((p) => JSON.stringify(p)).join("\n") + "\n");
+  }
+
+  test("--indexed naming a json field drops just that field and still writes a usable config", () => {
+    writeNested(tmpDir);
+    const configPath = path.join(tmpDir, "static-shard.config.json");
+
+    const { config, warnings } = init({
+      cwd: tmpDir,
+      configPath,
+      yes: true,
+      fullScan: true,
+      inputPath: "nested.ndjson",
+      indexedFields: ["category", "prices"],
+    });
+
+    // the offending field is un-indexed, not fatal — and everything else the user asked for survives
+    expect(config.schema.fields.prices?.kind).toBe("json");
+    expect(config.schema.fields.prices?.indexed).toBeUndefined();
+    expect(config.schema.fields.category?.indexed).toBe(true);
+    expect(existsSync(configPath)).toBe(true);
+
+    expect(warnings.join("\n")).toMatch(/prices/);
+    expect(warnings.join("\n")).toMatch(/payload-only|can't be filtered|cannot be filtered/i);
+
+    // and the config it wrote is one `build` accepts
+    const { manifest } = build(loadConfigFile(configPath), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    expect(manifest.dataset.recordCount).toBe(NESTED.length);
+    expect(manifest.schema.fields.prices?.indexed).toBe(false);
+  });
+
+  test("--contains / --ends-with naming a json field are dropped the same way", () => {
+    writeNested(tmpDir);
+    const configPath = path.join(tmpDir, "static-shard.config.json");
+
+    const { config, warnings } = init({
+      cwd: tmpDir,
+      configPath,
+      yes: true,
+      fullScan: true,
+      inputPath: "nested.ndjson",
+      containsFields: ["prices"],
+      endsWithFields: ["prices"],
+    });
+
+    expect(config.schema.fields.prices?.contains).toBeUndefined();
+    expect(config.schema.fields.prices?.endsWith).toBeUndefined();
+    expect(config.schema.fields.prices?.indexed).toBeUndefined();
+    expect(warnings.join("\n")).toMatch(/prices/);
+  });
+
+  test("an existing config that already marks a json field indexed is repaired rather than rejected", () => {
+    writeNested(tmpDir);
+    const configPath = path.join(tmpDir, "static-shard.config.json");
+    init({ cwd: tmpDir, configPath, yes: true, fullScan: true, inputPath: "nested.ndjson" });
+
+    // simulate a hand-edited config (or one written by an older version)
+    const handEdited = loadConfigFile(configPath);
+    handEdited.schema.fields.prices = { kind: "json", indexed: true, contains: true };
+    writeFileSync(configPath, JSON.stringify(handEdited, null, 2));
+
+    const { config, warnings } = init({ cwd: tmpDir, configPath, yes: true });
+    expect(config.schema.fields.prices?.indexed).toBeUndefined();
+    expect(config.schema.fields.prices?.contains).toBeUndefined();
+    expect(warnings.join("\n")).toMatch(/prices/);
+  });
+
+  test("a json field named as the sortField is still a hard error — there is no safe repair", () => {
+    writeNested(tmpDir);
+    expect(() =>
+      init({
+        cwd: tmpDir,
+        configPath: path.join(tmpDir, "static-shard.config.json"),
+        yes: true,
+        fullScan: true,
+        inputPath: "nested.ndjson",
+        sortField: "prices",
+      }),
+    ).toThrow(/prices/);
+  });
+});
+
 describe("seam #1 — external sort scale hardening (T13)", () => {
   test("forcing the disk-spill path (a tiny sortRunRecords) produces the same manifest+shards as the in-memory path", () => {
     const inMemory = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });

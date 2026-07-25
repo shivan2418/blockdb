@@ -123,6 +123,48 @@ export interface InitResult {
   config: StaticShardConfig;
   /** True when this run actually (re)inferred the schema, false when it reused an existing baked one. */
   reinferred: boolean;
+  /** Non-fatal repairs made while resolving — e.g. query flags dropped from a payload-only `json` field. */
+  warnings: string[];
+}
+
+/** Flags that only mean something on a queryable field; `config.ts` rejects all of them on a `json` field. */
+const QUERY_FLAGS = ["indexed", "endsWith", "contains", "multi", "absent"] as const;
+
+/**
+ * Strips query flags that landed on a payload-only `json` field, reporting each one.
+ *
+ * Asking to index a nested/mixed field is an easy mistake (a `--indexed` list, a hand-edited config,
+ * or a field that only became `json` on `--reinfer` after the data changed shape), and failing the
+ * whole run over it would throw away every other choice the user made. Dropping just the offending
+ * flags always lands a usable config; the field itself is still stored and returned, just not
+ * filterable. `sortField`/`pk` are deliberately NOT repaired this way — they name a required role,
+ * so quietly dropping them would leave the config structurally incomplete, and `resolveConfig`
+ * rightly rejects a `json` field in either slot.
+ */
+function dropQueryFlagsFromJsonFields(fields: Record<string, FieldConfig>): {
+  fields: Record<string, FieldConfig>;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const next: Record<string, FieldConfig> = {};
+
+  for (const [name, field] of Object.entries(fields)) {
+    const dropped = field.kind === "json" ? QUERY_FLAGS.filter((flag) => field[flag] === true) : [];
+    if (dropped.length === 0) {
+      next[name] = field;
+      continue;
+    }
+    const cfg: FieldConfig = { ...field };
+    for (const flag of dropped) delete cfg[flag];
+    next[name] = cfg;
+    warnings.push(
+      `static-shard: field "${name}" holds nested or mixed-type values, so it is payload-only (kind "json") — ` +
+        `dropped ${dropped.join(", ")}. It is still stored and returned by findMany, but cannot be filtered on. ` +
+        `To query it, flatten it into a scalar field upstream and re-run init --reinfer.`,
+    );
+  }
+
+  return { fields: next, warnings };
 }
 
 /**
@@ -196,6 +238,8 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
   }
 
   fields = applyFieldFlagOverrides(fields, sortField, pk, opts);
+  const repaired = dropQueryFlagsFromJsonFields(fields);
+  fields = repaired.fields;
 
   const output = opts.output ?? existing?.output;
   const clientOut = opts.clientOut ?? existing?.clientOut;
@@ -224,7 +268,7 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
   // Fail loud on any invalid combination before writing anything — reuses build's own invariants.
   resolveConfig(config, path.dirname(opts.configPath));
 
-  return { configPath: opts.configPath, config, reinferred };
+  return { configPath: opts.configPath, config, reinferred, warnings: repaired.warnings };
 }
 
 /**

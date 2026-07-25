@@ -156,6 +156,7 @@ async function runInit(rest: string[]): Promise<void> {
       ? await runInteractiveInit({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options })
       : init({ cwd: process.cwd(), configPath: resolvedConfigPath, ...options });
 
+  for (const warning of result.warnings) console.warn(warning);
   console.log(
     `static-shard: wrote ${result.configPath}` +
       (result.reinferred ? " (schema inferred)" : " (schema unchanged — pass --reinfer to refresh)"),

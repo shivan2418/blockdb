@@ -148,9 +148,15 @@ function sortCandidateFields(data: WizardData, state: WizardState): WizardField[
     .filter((f) => matchesQuery(f.name, state.filterQuery));
 }
 
-/** Filter-fields step's candidate list: every field except the current sort field (ADR-0006 §2). */
+/**
+ * Filter-fields step's candidate list: every field except the current sort field (ADR-0006 §2) and
+ * except payload-only `json` fields — those hold nested/mixed values that can't be indexed at all,
+ * so offering them would only let the user pick a choice the config validator then rejects.
+ */
 function filterableFields(data: WizardData, state: WizardState): WizardField[] {
-  return data.fields.filter((f) => f.name !== state.sortField && matchesQuery(f.name, state.filterQuery));
+  return data.fields.filter(
+    (f) => f.name !== state.sortField && f.kind !== "json" && matchesQuery(f.name, state.filterQuery),
+  );
 }
 
 export interface TextSearchRow {
@@ -549,13 +555,17 @@ function renderDetect(data: WizardData): string[] {
   lines.push(dim("  field                  type      cardinality   role"));
   for (const f of data.fields) {
     const role =
-      f.name === data.recommendedPk
-        ? color(ANSI.green, "PK guess")
-        : f.name === data.recommendedSortField
-          ? color(ANSI.cyan, "sort field guess")
-          : f.multi
-            ? color(ANSI.cyan, "multi-valued")
-            : "";
+      // Checked first: a json field is never a sort-field/multi candidate, and "payload-only" is
+      // the one thing worth saying about it — it explains why later steps won't offer it.
+      f.kind === "json"
+        ? dim("payload-only — not filterable")
+        : f.name === data.recommendedPk
+          ? color(ANSI.green, "PK guess")
+          : f.name === data.recommendedSortField
+            ? color(ANSI.cyan, "sort field guess")
+            : f.multi
+              ? color(ANSI.cyan, "multi-valued")
+              : "";
     lines.push(`  ${pad(f.name, 22)} ${pad(f.kind, 9)} ${pad(fmtInt(f.cardinality), 13)} ${role}`);
   }
   lines.push("", color(ANSI.cyan, "  [Enter] looks right, continue →"));
@@ -589,9 +599,19 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
 
 function renderFilterFields(data: WizardData, state: WizardState, estimate: WizardEstimate, terminalRows?: number): string[] {
   const candidates = filterableFields(data, state);
+  // Payload-only fields are absent from the list by construction — say so, or their absence just
+  // looks like the wizard lost them.
+  const payloadOnlyCount = data.fields.filter((f) => f.kind === "json").length;
   const header = [
     bold("Which fields do you want to filter on?"),
     dim("  Only indexed fields are queryable. Each one adds a little to the first download, plus an index that loads only when a query uses it."),
+    ...(payloadOnlyCount > 0
+      ? [
+          dim(
+            `  ${fmtInt(payloadOnlyCount)} field(s) hold nested or mixed values — stored and returned, but not filterable, so they aren't listed.`,
+          ),
+        ]
+      : []),
     "",
   ];
   const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
