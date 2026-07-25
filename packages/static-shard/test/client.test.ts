@@ -757,3 +757,170 @@ describe("createClient / secondary zonemap sidecars (T13, ADR-0003 §3)", () => 
     expect((error as ShardError).url).toBe("/data/zonemap/title-abc123.json");
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0008 §5: findMany walks candidate shards in sort order accumulating
+// matches until it has limit + 1, rather than fetching every candidate.
+// 12 shards x 5 records, one year per shard — big enough that "stopped early"
+// is distinguishable from "fetched everything".
+// ---------------------------------------------------------------------------
+
+const WALK_SHARDS = 12;
+const WALK_PER_SHARD = 5;
+
+const walkShardContents: Record<string, string> = {};
+for (let s = 0; s < WALK_SHARDS; s++) {
+  const lines: string[] = [];
+  for (let r = 0; r < WALK_PER_SHARD; r++) {
+    lines.push(JSON.stringify({ year: 2000 + s, title: `t${s}-${r}`, rating: (s * WALK_PER_SHARD + r) % 7 }));
+  }
+  walkShardContents[`w${s}`] = lines.join("\n") + "\n";
+}
+
+const walkManifest: Manifest = {
+  formatVersion: 0,
+  generatorVersion: "0.1.0",
+  dataset: { collection: "movies", recordCount: WALK_SHARDS * WALK_PER_SHARD, shardCount: WALK_SHARDS, sortField: "year" },
+  schema: {
+    collection: "movies",
+    sortField: "year",
+    fields: {
+      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      title: { kind: "string", isDate: false, indexed: false, operators: [] },
+      rating: { kind: "number", isDate: false, indexed: false, operators: [] },
+    },
+  },
+  shards: Array.from({ length: WALK_SHARDS }, (_, s) => ({
+    hash: `w${s}`,
+    bytes: walkShardContents[`w${s}`]!.length,
+    count: WALK_PER_SHARD,
+  })),
+  zonemap: { year: { splitPoints: [...Array.from({ length: WALK_SHARDS }, (_, s) => 2000 + s), 2000 + WALK_SHARDS - 1] } },
+  indexes: {},
+};
+
+const walkSchema: SchemaMeta = { movies: { fields: walkManifest.schema.fields } };
+
+interface WalkMovie {
+  year: number;
+  title: string;
+  rating: number;
+}
+interface WalkRecords {
+  movies: WalkMovie;
+}
+
+function walkFetch(requests: string[]): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("manifest.json")) {
+      return { ok: true, status: 200, json: async () => walkManifest, text: async () => JSON.stringify(walkManifest) } as Response;
+    }
+    const hash = url.split("/").pop()!.replace(".ndjson", "");
+    const body = walkShardContents[hash];
+    if (!body) return { ok: false, status: 404, json: async () => ({}), text: async () => "" } as Response;
+    return { ok: true, status: 200, json: async () => JSON.parse(body), text: async () => body } as Response;
+  }) as typeof fetch;
+}
+
+function walkClient(requests: string[]) {
+  return createClient<typeof walkSchema, WalkRecords>(walkSchema, { basePath: "/data", fetch: walkFetch(requests) });
+}
+const shardsFetched = (requests: string[]): string[] => requests.filter((u) => u.includes("/shards/"));
+
+describe("findMany — bounded queries stop fetching once the page is filled (ADR-0008 §5)", () => {
+  test("a small limit over many candidate shards reads only the leading shards", async () => {
+    const requests: string[] = [];
+    const { records, hasMore } = await walkClient(requests).movies.findMany({ where: { year: { gte: 2000 } }, limit: 3 });
+
+    expect(records.map((r) => r.title)).toEqual(["t0-0", "t0-1", "t0-2"]);
+    expect(hasMore).toBe(true);
+    // the whole page lives in shard 0; reading all 12 candidates would be the bug
+    expect(shardsFetched(requests).length).toBeLessThan(WALK_SHARDS);
+    expect(shardsFetched(requests)).toContain("/data/shards/w0.ndjson");
+    expect(shardsFetched(requests)).not.toContain("/data/shards/w11.ndjson");
+  });
+
+  test("returns exactly what the unbounded query's first page would be", async () => {
+    const boundedReqs: string[] = [];
+    const fullReqs: string[] = [];
+    const bounded = await walkClient(boundedReqs).movies.findMany({ where: { year: { gte: 2000 } }, limit: 7 });
+    const full = await walkClient(fullReqs).movies.findMany({ where: { year: { gte: 2000 } } });
+
+    expect(bounded.records).toEqual(full.records.slice(0, 7));
+    expect(bounded.hasMore).toBe(true);
+    // ...for strictly less traffic
+    expect(shardsFetched(boundedReqs).length).toBeLessThan(shardsFetched(fullReqs).length);
+    expect(shardsFetched(fullReqs).length).toBe(WALK_SHARDS);
+  });
+
+  test("offset composes — the page is offset + limit deep into the same ordering", async () => {
+    const requests: string[] = [];
+    const { records, hasMore } = await walkClient(requests).movies.findMany({
+      where: { year: { gte: 2000 } },
+      offset: 6,
+      limit: 3,
+    });
+    expect(records.map((r) => r.title)).toEqual(["t1-1", "t1-2", "t1-3"]);
+    expect(hasMore).toBe(true);
+    expect(shardsFetched(requests).length).toBeLessThan(WALK_SHARDS);
+  });
+
+  test("hasMore is exact at the boundary: false when the page ends the result set", async () => {
+    const requests: string[] = [];
+    // 60 records total; a limit that exactly consumes them must report no next page
+    const { records, hasMore } = await walkClient(requests).movies.findMany({
+      where: { year: { gte: 2000 } },
+      limit: WALK_SHARDS * WALK_PER_SHARD,
+    });
+    expect(records).toHaveLength(WALK_SHARDS * WALK_PER_SHARD);
+    expect(hasMore).toBe(false);
+  });
+
+  test("orderBy on the sort field descending walks from the last shard instead", async () => {
+    const requests: string[] = [];
+    const { records, hasMore } = await walkClient(requests).movies.findMany({
+      where: { year: { gte: 2000 } },
+      orderBy: { year: "desc" },
+      limit: 3,
+    });
+    expect(records.map((r) => r.year)).toEqual([2011, 2011, 2011]);
+    expect(hasMore).toBe(true);
+    expect(shardsFetched(requests)).toContain("/data/shards/w11.ndjson");
+    expect(shardsFetched(requests)).not.toContain("/data/shards/w0.ndjson");
+    expect(shardsFetched(requests).length).toBeLessThan(WALK_SHARDS);
+  });
+
+  test("orderBy on a NON-sort field must still read every candidate — global order needs every match", async () => {
+    const requests: string[] = [];
+    const { records } = await walkClient(requests).movies.findMany({
+      where: { year: { gte: 2000 } },
+      orderBy: { rating: "desc" },
+      limit: 3,
+    });
+    // rating maxes at 6; correctness here is the point, not traffic
+    expect(records.map((r) => r.rating)).toEqual([6, 6, 6]);
+    expect(shardsFetched(requests).length).toBe(WALK_SHARDS);
+  });
+
+  test("an unbounded query still reads every candidate", async () => {
+    const requests: string[] = [];
+    const { records, hasMore } = await walkClient(requests).movies.findMany({ where: { year: { gte: 2000 } } });
+    expect(records).toHaveLength(WALK_SHARDS * WALK_PER_SHARD);
+    expect(hasMore).toBe(false);
+    expect(shardsFetched(requests).length).toBe(WALK_SHARDS);
+  });
+
+  test("a filter too selective to fill the page reads every candidate, and says there is no next page", async () => {
+    const requests: string[] = [];
+    // only 5 records match; a limit of 40 can never be filled, so early exit is impossible
+    const { records, hasMore } = await walkClient(requests).movies.findMany({
+      where: { year: { gte: 2000 }, title: { startsWith: "t7-" } },
+      limit: 40,
+    });
+    expect(records).toHaveLength(WALK_PER_SHARD);
+    expect(hasMore).toBe(false);
+    expect(shardsFetched(requests).length).toBe(WALK_SHARDS);
+  });
+});

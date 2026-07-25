@@ -304,6 +304,89 @@ function compareByOrderBy(
   return 0;
 }
 
+function fetchShardAt(manifest: Manifest, ctx: FetchContext, index: number): Promise<Record<string, unknown>[]> {
+  return ctx.track(
+    fetchShardRecords(
+      ctx.basePath,
+      manifest.shards[index]!.hash,
+      manifest.shards.length,
+      manifest.dataset.gzip === true,
+      ctx.fetchImpl,
+      ctx.signal,
+    ),
+  );
+}
+
+/**
+ * Shards per round of the walk. Fetching strictly one at a time would minimise bytes but serialise a
+ * round trip per shard; a small window keeps the requests parallel while still stopping within
+ * `SHARD_WALK_BATCH - 1` shards of the page being filled. The comparison that matters is against
+ * fetching *every* candidate, which is what this replaces.
+ */
+const SHARD_WALK_BATCH = 4;
+
+/**
+ * Which direction to walk candidate shards when a bounded query's requested order already matches
+ * their physical order — `undefined` when it doesn't, meaning every candidate has to be fetched
+ * before the ordering (and therefore the page) is known.
+ */
+function shardWalkDirection(manifest: Manifest, args: RawFindManyArgs | undefined): "asc" | "desc" | undefined {
+  // Without a limit every match is returned, so there is no page to stop at.
+  if (args?.limit === undefined) return undefined;
+
+  const orderBy = args.orderBy;
+  const keys = orderBy === undefined ? [] : Object.keys(orderBy);
+  // No orderBy: the result order IS shard order, so walking is exactly equivalent to the full fetch.
+  if (keys.length === 0) return "asc";
+
+  const sortField = manifest.dataset.sortField;
+  if (keys.length !== 1 || keys[0] !== sortField) return undefined;
+
+  // An explicit orderBy on the sort field agrees with shard order only when nothing has a
+  // null/absent sort value: those sit at the HIGH end on disk (ADR-0002 §9) but compare as lowest,
+  // so the two disagree and only materialize-then-sort places them correctly.
+  const zonemap = manifest.zonemap[sortField];
+  if (zonemap !== undefined && "splitPoints" in zonemap && zonemap.missing !== undefined) return undefined;
+
+  return orderBy![sortField] === "desc" ? "desc" : "asc";
+}
+
+/**
+ * ADR-0008 §5: walk candidate shards in sort order accumulating post-filtered matches until
+ * `offset + limit + 1` exist, then stop. The `+1` is what makes `hasMore` exact without a second
+ * query. Because the accumulated matches are a prefix of the globally ordered result set, slicing
+ * the page out of them is identical to slicing it out of every match — for a fraction of the bytes
+ * when the filter is unselective (the case where fetching all candidates hurt most).
+ */
+async function findManyByShardWalk(
+  manifest: Manifest,
+  ctx: FetchContext,
+  candidateIndices: number[],
+  args: RawFindManyArgs,
+  direction: "asc" | "desc",
+): Promise<{ records: Record<string, unknown>[]; hasMore: boolean }> {
+  const limit = args.limit!;
+  const offset = args.offset ?? 0;
+  const needed = offset + limit + 1;
+  const order = direction === "asc" ? candidateIndices : [...candidateIndices].reverse();
+
+  const matches: Record<string, unknown>[] = [];
+  for (let i = 0; i < order.length && matches.length < needed; i += SHARD_WALK_BATCH) {
+    const batch = order.slice(i, i + SHARD_WALK_BATCH);
+    const fetched = await Promise.all(batch.map((index) => fetchShardAt(manifest, ctx, index)));
+    for (const records of fetched) {
+      // Records within a shard are ascending by the sort field; a descending walk reverses each
+      // shard as well as the shard order. Ties among equal sort values are unordered either way.
+      for (const record of direction === "asc" ? records : [...records].reverse()) {
+        if (matchesWhere(record, args.where)) matches.push(record);
+      }
+    }
+  }
+
+  const windowed = matches.slice(offset);
+  return { records: windowed.slice(0, limit), hasMore: windowed.length > limit };
+}
+
 async function executeFindMany(
   manifest: Manifest,
   ctx: FetchContext,
@@ -311,20 +394,14 @@ async function executeFindMany(
   maxResults: number,
 ): Promise<{ records: Record<string, unknown>[]; hasMore: boolean }> {
   const candidateIndices = await candidateIndicesForWhere(manifest, ctx, args?.where);
+
+  const walkDirection = shardWalkDirection(manifest, args);
+  if (walkDirection !== undefined) {
+    return await findManyByShardWalk(manifest, ctx, candidateIndices, args!, walkDirection);
+  }
+
   const fetched = await Promise.all(
-    candidateIndices.map(async (index) => ({
-      index,
-      records: await ctx.track(
-        fetchShardRecords(
-          ctx.basePath,
-          manifest.shards[index]!.hash,
-          manifest.shards.length,
-          manifest.dataset.gzip === true,
-          ctx.fetchImpl,
-          ctx.signal,
-        ),
-      ),
-    })),
+    candidateIndices.map(async (index) => ({ index, records: await fetchShardAt(manifest, ctx, index) })),
   );
   fetched.sort((a, b) => a.index - b.index);
 
