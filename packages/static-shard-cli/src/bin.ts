@@ -5,6 +5,8 @@ import { loadConfigFile } from "./config.js";
 import { init } from "./init.js";
 import { inspect } from "./inspect.js";
 import { runInteractiveInit } from "./wizard-tui.js";
+import { COMMAND_HELP, TOP_LEVEL_HELP, isHelpFlag, isVersionFlag } from "./help.js";
+import { getGeneratorVersion } from "./version.js";
 import type { InitOptions, InitResult } from "./init.js";
 import type { InspectReport } from "./inspect.js";
 import type { InputFormat } from "./types.js";
@@ -231,6 +233,22 @@ function runInspect(rest: string[]): void {
 
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
+
+  // Help/version asked for explicitly is the program working: stdout, exit 0. Help shown because
+  // the invocation was incomplete or wrong is a usage error: stderr, exit 1.
+  if (isVersionFlag(command)) {
+    console.log(getGeneratorVersion());
+    return;
+  }
+  if (isHelpFlag(command)) {
+    console.log(TOP_LEVEL_HELP);
+    return;
+  }
+  if (command !== undefined && COMMAND_HELP[command] && rest.some(isHelpFlag)) {
+    console.log(COMMAND_HELP[command]);
+    return;
+  }
+
   if (command === "build") {
     runBuild(rest);
     return;
@@ -244,9 +262,9 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  console.error(
-    `static-shard: unknown command "${command ?? ""}" — usage: static-shard <init|build|inspect> [--config <path>]`,
-  );
+  const problem =
+    command === undefined ? "static-shard: no command given" : `static-shard: unknown command "${command}"`;
+  console.error(`${problem}\n\n${TOP_LEVEL_HELP}`);
   process.exitCode = 1;
 }
 
