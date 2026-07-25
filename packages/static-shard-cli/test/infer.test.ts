@@ -372,3 +372,39 @@ describe("inferSchema — default indexed set is facet-shaped, not merely small"
     expect(inferSchema(records).indexedFields).toContain("category");
   });
 });
+
+describe("inferSchema — value shape detection", () => {
+  const many = (make: (i: number) => unknown) => Array.from({ length: 30 }, (_, i) => ({ rank: i, v: make(i) }));
+
+  test("recognises URLs, whatever the scheme", () => {
+    expect(inferSchema(many((i) => `https://api.example.com/cards/${i}?utm_source=api`)).fields.v!.shape).toBe("url");
+    expect(inferSchema(many((i) => `s3://bucket/object-${i}`)).fields.v!.shape).toBe("url");
+  });
+
+  test("recognises hex UUIDs", () => {
+    const uuid = (i: number) => `f47ac10b-58cc-4372-a567-0e02b2c3d${String(i).padStart(3, "0")}`;
+    expect(inferSchema(many(uuid)).fields.v!.shape).toBe("uuid");
+  });
+
+  test("everything else is plain text, including near-misses", () => {
+    expect(inferSchema(many((i) => `Lightning Bolt ${i}`)).fields.v!.shape).toBe("text");
+    expect(inferSchema(many((i) => `set-code-${i}`)).fields.v!.shape).toBe("text");
+    // not a URL: no scheme separator
+    expect(inferSchema(many((i) => `api.example.com/${i}`)).fields.v!.shape).toBe("text");
+    // not a UUID: wrong group lengths
+    expect(inferSchema(many((i) => `abc-def-${i}`)).fields.v!.shape).toBe("text");
+  });
+
+  test("a stray outlier doesn't hide the shape, but a real mix isn't claimed", () => {
+    const urls = Array.from({ length: 30 }, (_, i) => ({ rank: i, v: i === 0 ? "n/a" : `https://x.test/${i}` }));
+    expect(inferSchema(urls).fields.v!.shape).toBe("url");
+
+    const half = Array.from({ length: 30 }, (_, i) => ({ rank: i, v: i % 2 ? `https://x.test/${i}` : `plain ${i}` }));
+    expect(inferSchema(half).fields.v!.shape).toBe("text");
+  });
+
+  test("a multi-valued field's shape comes from its elements", () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({ rank: i, links: [`https://x.test/a${i}`, `https://x.test/b${i}`] }));
+    expect(inferSchema(rows).fields.links!.shape).toBe("url");
+  });
+});

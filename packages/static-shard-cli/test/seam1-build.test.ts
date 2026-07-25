@@ -1436,3 +1436,47 @@ describe("seam #1 — external sort scale hardening (T13)", () => {
     expect(gunzipSync(compressed).toString("utf8")).toBe(plainContent);
   });
 });
+
+describe("seam #1 — warning about text indexes the data can't support", () => {
+  const ROWS = Array.from({ length: 40 }, (_, i) => ({
+    id: `f47ac10b-58cc-4372-a567-0e02b2c3d${String(i).padStart(3, "0")}`,
+    rank: i,
+    uri: `https://api.example.com/cards/${i}?utm_source=api`,
+    name: `Lightning Bolt ${i}`,
+  }));
+
+  beforeEach(() => {
+    writeFileSync(path.join(tmpDir, "shaped.ndjson"), ROWS.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  });
+
+  test("init warns when endsWith/contains is turned on for URL and UUID fields, but not for real text", () => {
+    const { warnings } = init({
+      cwd: tmpDir,
+      configPath: path.join(tmpDir, "static-shard.config.json"),
+      yes: true,
+      inputPath: "shaped.ndjson",
+      endsWithFields: ["uri", "id", "name"],
+      containsFields: ["uri", "id", "name"],
+    });
+    const joined = warnings.join("\n");
+
+    // URLs end in an opaque id or a shared suffix — the reversed index can't discriminate
+    expect(joined).toMatch(/endsWith\(uri\)[\s\S]*URL/);
+    expect(joined).toMatch(/contains\(uri\)[\s\S]*URL/);
+    // hex identifiers have no meaningful substrings either way
+    expect(joined).toMatch(/endsWith\(id\)[\s\S]*identifier/);
+    expect(joined).toMatch(/contains\(id\)[\s\S]*identifier/);
+    // ...and a genuine text field is left alone
+    expect(joined).not.toMatch(/\((name)\)/);
+  });
+
+  test("says nothing when no text index was requested", () => {
+    const { warnings } = init({
+      cwd: tmpDir,
+      configPath: path.join(tmpDir, "static-shard.config.json"),
+      yes: true,
+      inputPath: "shaped.ndjson",
+    });
+    expect(warnings.join("\n")).not.toMatch(/endsWith|contains/);
+  });
+});

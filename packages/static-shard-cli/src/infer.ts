@@ -30,6 +30,29 @@ const MIN_RECORDS_FOR_FACET_BAND = 100;
  */
 export const MAX_ENUM_VALUES = 16;
 
+/**
+ * What a field's values LOOK like, independent of how many there are. Used to warn about text indexes
+ * that cannot work before one is built, complementing the build's measured "barely prunes" check —
+ * this is structural and available at choice time, that one is empirical and only available after.
+ */
+export type ValueShape = "url" | "uuid" | "text";
+
+/** Any scheme-prefixed URI, not just http(s). */
+const URL_SHAPE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Share of sampled values that must match for the shape to be claimed — a stray outlier shouldn't hide it. */
+const SHAPE_MAJORITY = 0.9;
+
+function valueShapeOf(values: unknown[]): ValueShape {
+  const strings = values.filter((v): v is string => typeof v === "string");
+  if (strings.length === 0) return "text";
+  const urls = strings.filter((v) => URL_SHAPE_RE.test(v)).length;
+  if (urls >= strings.length * SHAPE_MAJORITY) return "url";
+  const uuids = strings.filter((v) => UUID_SHAPE_RE.test(v)).length;
+  if (uuids >= strings.length * SHAPE_MAJORITY) return "uuid";
+  return "text";
+}
+
 export interface InferredField {
   kind: FieldKind;
   /** Distinct non-null values observed (for multi fields: distinct elements across all arrays). */
@@ -43,6 +66,8 @@ export interface InferredField {
    * Drives codegen's value union; omitted for every other field so they stay typed as plain `string`.
    */
   values?: string[];
+  /** What the values look like — advisory only, never persisted to the config. */
+  shape: ValueShape;
 }
 
 export interface InferenceResult {
@@ -90,6 +115,7 @@ function payloadField(presentValues: unknown[], recordCount: number): InferredFi
     cardinality: distinctCount(presentValues.filter((v) => v !== null)),
     absent: presentValues.length < recordCount,
     multi: false,
+    shape: "text",
   };
 }
 
@@ -126,6 +152,7 @@ function inferField(fieldName: string, presentValues: unknown[], recordCount: nu
       cardinality: distinctCount(elements),
       absent: presentValues.length < recordCount,
       multi: true,
+      shape: valueShapeOf(elements),
       ...(elementValues ? { values: elementValues } : {}),
     };
   }
@@ -138,6 +165,7 @@ function inferField(fieldName: string, presentValues: unknown[], recordCount: nu
     cardinality: distinctCount(nonNull),
     absent: presentValues.length < recordCount,
     multi: false,
+    shape: valueShapeOf(nonNull),
     ...(values ? { values } : {}),
   };
 }

@@ -1,3 +1,4 @@
+import type { ValueShape } from "./infer.js";
 import type { ShardDescriptor } from "./types.js";
 
 /** Heuristic average sort-value run length past which a sort field counts as "low cardinality" (ADR-0002 §6) — scale-free, so it works identically whether cardinality came from raw records or shard-boundary split-points. Not a hard rule: `cutIntoShards` caps real `shardCount` at cardinality (equal-key runs never split), so this can't be phrased as "fewer distinct values than shards". */
@@ -50,6 +51,43 @@ export function unselectiveTextIndexWarning(
     `are spread evenly across every file. equals/in/startsWith are already enabled and free for "${field}" — ` +
     `consider turning ${operator} off.`
   );
+}
+
+/**
+ * Warns about a text index whose field's values cannot support it, judged from their SHAPE rather than
+ * from the field's name. This fires at choice time — before a build exists — and complements
+ * `unselectiveTextIndexWarning`, which measures the built structure and so can only report afterwards.
+ *
+ * `endsWith` on URLs is the clearest case: they end either in an opaque id or in a suffix every record
+ * shares (`?utm_source=api` across an entire real dataset), so the reversed index cannot discriminate.
+ * Hex identifiers have no meaningful substrings in either direction.
+ */
+export function unsuitableTextIndexWarning(
+  field: string,
+  operator: "endsWith" | "contains",
+  shape: ValueShape,
+): string | undefined {
+  if (shape === "uuid") {
+    return (
+      `static-shard: ${operator}(${field}): the values are identifiers (hex UUIDs), which have no meaningful ` +
+      `substrings — this index can't answer a question anyone asks. Use equals/in, which are already free.`
+    );
+  }
+  if (shape === "url") {
+    if (operator === "endsWith") {
+      return (
+        `static-shard: endsWith(${field}): the values are URLs, which end either in an opaque id or in a ` +
+        `suffix every record shares — so a reversed index can't discriminate between them. This is usually ` +
+        `pure build output for no query.`
+      );
+    }
+    return (
+      `static-shard: contains(${field}): the values are URLs. Substring-searching them is rarely what an app ` +
+      `needs, and a trigram index over URLs is one of the largest structures a build can produce — check you ` +
+      `really want it.`
+    );
+  }
+  return undefined;
 }
 
 /** ADR-0002 §5: a record bigger than the shard-byte target gets its own oversized, flagged shard. */

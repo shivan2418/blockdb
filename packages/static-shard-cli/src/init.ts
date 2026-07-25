@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { loadConfigFile, resolveConfig } from "./config.js";
-import { inferSchema } from "./infer.js";
+import { inferSchema, type ValueShape } from "./infer.js";
 import { readInputRecords } from "./input.js";
 import type { OnProgress } from "./progress.js";
+import { unsuitableTextIndexWarning } from "./warnings.js";
 import type { FieldConfig, InputFormat, StaticShardConfig } from "./types.js";
 import { getFormatVersion } from "./version.js";
 
@@ -222,6 +223,8 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
   let fields: Record<string, FieldConfig>;
   let sortField: string;
   let pk: string | undefined;
+  /** Per-field value shapes, only available on a run that actually read records (see the warning below). */
+  let inferredShapes: Record<string, ValueShape> | undefined;
 
   if (reinferred) {
     const readDelimiter = delimiter ?? (format === "tsv" ? "\t" : ",");
@@ -244,6 +247,7 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
 
     sortField = opts.sortField ?? inferred.sortField;
     pk = opts.pk ?? inferred.pk;
+    inferredShapes = Object.fromEntries(Object.entries(inferred.fields).map(([name, f]) => [name, f.shape]));
 
     const defaultIndexed = new Set(inferred.indexedFields);
     if (pk !== undefined) defaultIndexed.add(pk);
@@ -307,7 +311,20 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
   // Fail loud on any invalid combination before writing anything — reuses build's own invariants.
   resolveConfig(config, path.dirname(opts.configPath));
 
-  return { configPath: opts.configPath, config, reinferred, warnings: repaired.warnings };
+  // Shape-based text-index warnings need the inferred shapes, so they only exist on a run that
+  // actually read the data (a first run, or `--reinfer`). Reusing a baked schema reads no records.
+  const shapeWarnings: string[] = [];
+  if (inferredShapes !== undefined) {
+    for (const [name, field] of Object.entries(config.schema.fields)) {
+      for (const operator of ["endsWith", "contains"] as const) {
+        if (!field[operator]) continue;
+        const unsuitable = unsuitableTextIndexWarning(name, operator, inferredShapes[name] ?? "text");
+        if (unsuitable) shapeWarnings.push(unsuitable);
+      }
+    }
+  }
+
+  return { configPath: opts.configPath, config, reinferred, warnings: [...repaired.warnings, ...shapeWarnings] };
 }
 
 /**

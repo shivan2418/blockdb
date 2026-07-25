@@ -10,12 +10,12 @@ import {
   type IndexSizeEstimate,
 } from "./estimator.js";
 import { DEFAULT_INDEX_CHUNK_BYTES } from "./config.js";
-import { inferSchema, isSortFieldCandidate } from "./infer.js";
+import { inferSchema, isSortFieldCandidate, type ValueShape } from "./infer.js";
 import { compareSortValues, type SortKind } from "./sort.js";
 import { valuesOf } from "./secondary-index.js";
 import type { PopulationStats } from "./input.js";
 import type { OnProgress } from "./progress.js";
-import { lowCardinalitySortFieldWarning, oversizedRecordWarning } from "./warnings.js";
+import { lowCardinalitySortFieldWarning, oversizedRecordWarning, unsuitableTextIndexWarning } from "./warnings.js";
 import type { FieldConfig, FieldKind } from "./types.js";
 
 /**
@@ -61,6 +61,8 @@ export interface WizardField {
   cardinality: number;
   absent: boolean;
   multi: boolean;
+  /** What the values look like — drives the text-search step's "this can't work" warning. */
+  shape: ValueShape;
 }
 
 export interface WizardData {
@@ -103,7 +105,7 @@ export function buildWizardData(
   // Inference sees every record it was given; only the estimate sample below is capped.
   const inferred = inferSchema(records, opts);
   const fields: WizardField[] = Object.entries(inferred.fields)
-    .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi }))
+    .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi, shape: f.shape }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   const sortCandidates = fields.filter(isSortFieldCandidate).map((f) => f.name);
@@ -693,6 +695,17 @@ function computeEstimateForState(data: WizardData, state: WizardState): WizardEs
           ? `Sorting by "${best}" would average about ${Math.round(alternative.mean * 100)}% instead.`
           : `Some fields cannot be helped by any sort field — only one dimension can be clustered.`),
     );
+  }
+  // Structural, so it lands the moment the box is ticked rather than after a build.
+  const byField = new Map(data.fields.map((f) => [f.name, f]));
+  for (const [operator, selected] of [
+    ["endsWith", state.endsWithFields],
+    ["contains", state.containsFields],
+  ] as const) {
+    for (const field of selected) {
+      const unsuitable = unsuitableTextIndexWarning(field, operator, byField.get(field)?.shape ?? "text");
+      if (unsuitable) warnings.push(unsuitable);
+    }
   }
   for (const [name, idx] of Object.entries(costs.indexes)) {
     if (idx.containsExceedsColumn) {
