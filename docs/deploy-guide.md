@@ -34,12 +34,27 @@ Same-origin deploys (the common case: `public/shard-data/` under your own site) 
   transport compression (as most static hosts/CDNs already do for JSON/NDJSON). This is why
   static-shard ships whole files instead of byte ranges — compression and range-reads don't fight
   each other here.
-- **Build-time gzip (`gzip: true` in config)** pre-compresses shard payloads; the runtime
-  decompresses them with the native `DecompressionStream` API (no library, no WASM). Use this only
-  when your host can't apply `Content-Encoding` itself (some plain object-storage buckets don't).
+- **Build-time gzip (`gzip: true` in config)** pre-compresses **every file the deploy serves** — shard
+  payloads, index chunks, zonemap sidecars, and the root manifest — and the runtime decompresses them
+  with the native `DecompressionStream` API (no library, no WASM). Use this only when your host can't
+  apply `Content-Encoding` itself (some plain object-storage buckets don't). On a 25k-record dataset it
+  took the served tree from 10.45 MB to 2.49 MB, and a single query from 612 KB to 157 KB.
+
+  Two things change on disk, both deliberate:
+
+  - Compressed files carry a `.gz` suffix (`index/name/1a2b….json.gz`), and the manifest's own
+    references already point at those names — the path is how the client knows the encoding, so a tree
+    holding a mix of compressed and plain files still reads correctly.
+  - The root manifest becomes `manifest.json.gz`. It is the bootstrap fetch, so nothing it points at
+    can describe it; the generated client is stamped with the answer instead. **Deploy the generated
+    client from the same `build`** — a client generated before you enabled `gzip` will look for
+    `manifest.json` and get a 404. (Hand-written `createClient` callers pass `manifestGzip: true`.)
+
+  Content hashes stay over the *uncompressed* bytes, so toggling `gzip` between rebuilds never changes
+  a filename and never invalidates a visitor's immutable cache beyond the encoding change itself.
 - **Never double-compress**: if you enable build-time `gzip`, make sure the host doesn't *also*
-  re-gzip an already-gzipped `.ndjson`/`.json` file — check the `Content-Encoding` response header
-  actually served, not just what you configured.
+  re-gzip an already-gzipped `.gz` file — check the `Content-Encoding` response header actually
+  served, not just what you configured. This is the main reason `gzip` is off by default.
 - Brotli is **not** handled by the runtime directly (`DecompressionStream` is gzip/deflate only) —
   rely on the host's transport-level Brotli instead of a build-time option for it.
 

@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -207,5 +208,39 @@ describe("estimator.ts (pure, sampled): stays a reasonable order-of-magnitude es
     // Cardinality reconciles exactly: both count the same distinct raw values off the same records.
     expect(profile.fields["director"]!.cardinality).toBe(new Set(records.map((r) => r.director)).size);
     expect(profile.fields["title"]!.cardinality).toBe(new Set(records.map((r) => r.title)).size);
+  });
+});
+
+describe("inspect --dir over a gzipped deploy (ADR-0002 §8)", () => {
+  test("reads the relocated manifest and the compressed chunks, reporting logical bytes", () => {
+    // Logical, not on-disk, bytes: the report compares an index against its own column
+    // (`containsExceedsColumn`) and must agree with `inspect --config`, which only ever sees
+    // uncompressed content. Measuring compressed bytes here would break both.
+    const plain = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const plainReport = inspect({ dir: plain.outputDir });
+
+    const gz = build(
+      { ...config, gzip: true, output: "out-gz" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+    const gzReport = inspect({ dir: gz.outputDir });
+
+    // Logical bytes = the decompressed manifest, NOT the file on disk. (It isn't equal to the plain
+    // build's either: every chunk path in it gained a `.gz` suffix, so it is genuinely a bit longer.)
+    const onDisk = readFileSync(path.join(gz.outputDir, "manifest.json.gz"));
+    const logical = gunzipSync(onDisk).toString("utf8");
+    expect(gzReport.manifestBytes).toBe(Buffer.byteLength(logical, "utf8"));
+    expect(onDisk.length).toBeLessThan(gzReport.manifestBytes);
+
+    // Chunk CONTENTS are byte-identical across the two builds, so these must match exactly.
+    expect(gzReport.indexes["title"]!.trigramBytes).toBe(plainReport.indexes["title"]!.trigramBytes);
+    expect(gzReport.indexes["director"]!.reversedBytes).toBe(plainReport.indexes["director"]!.reversedBytes);
+    expect(gzReport.shards.totalBytes).toBe(plainReport.shards.totalBytes);
+  });
+
+  test("an empty directory still reports the actionable 'has it been built yet?' error", () => {
+    const empty = path.join(tmpDir, "nothing-here");
+    writeFileSync(path.join(tmpDir, "placeholder"), "");
+    expect(() => inspect({ dir: empty })).toThrow(/built yet/);
   });
 });

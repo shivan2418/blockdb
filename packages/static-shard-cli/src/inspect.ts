@@ -218,22 +218,34 @@ function inspectConfig(configPath: string): InspectReport {
   };
 }
 
+/**
+ * Reads a built file back to its LOGICAL text, decompressing when the deploy pre-gzipped it
+ * (ADR-0002 §8). Every size this report quotes is logical, for two reasons: `containsExceedsColumn`
+ * compares an index against its own raw column, and `inspect --config` must agree byte-for-byte with
+ * `inspect --dir` (it only ever sees uncompressed content). Quoting compressed bytes would silently
+ * break both.
+ */
+function readLogicalText(filePath: string): string {
+  return filePath.endsWith(".gz") ? gunzipSync(readFileSync(filePath)).toString("utf8") : readFileSync(filePath, "utf8");
+}
+
 function inspectDir(dir: string): InspectReport {
-  const manifestPath = path.join(dir, "manifest.json");
-  if (!existsSync(manifestPath)) {
+  // A gzipped build ships `manifest.json.gz` instead — the name changes, not just the encoding.
+  const manifestPath = [path.join(dir, "manifest.json"), path.join(dir, "manifest.json.gz")].find((candidate) =>
+    existsSync(candidate),
+  );
+  if (manifestPath === undefined) {
     throw new Error(`static-shard: inspect --dir "${dir}" has no manifest.json — has it been built yet?`);
   }
-  const manifestJson = readFileSync(manifestPath, "utf8");
+  const manifestJson = readLogicalText(manifestPath);
   const manifest = JSON.parse(manifestJson) as Manifest;
 
-  const readChunk = (relPath: string): string => readFileSync(path.join(dir, relPath), "utf8");
+  const readChunk = (relPath: string): string => readLogicalText(path.join(dir, relPath));
   const columnBytesFor = (field: string, multi: boolean): number => {
     let bytes = 0;
     for (const shard of manifest.shards) {
       const shardPath = path.join(dir, shardRelPath(shard.hash, manifest.shards.length, manifest.dataset.gzip === true));
-      const content = manifest.dataset.gzip === true
-        ? gunzipSync(readFileSync(shardPath)).toString("utf8")
-        : readFileSync(shardPath, "utf8");
+      const content = readLogicalText(shardPath);
       for (const line of content.split("\n")) {
         if (line.length === 0) continue;
         const record = JSON.parse(line) as Record<string, unknown>;
