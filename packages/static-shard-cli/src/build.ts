@@ -257,7 +257,10 @@ export function build(config: StaticShardConfig, opts: BuildOptions): BuildResul
     writeFileSync(filePath, content);
     progress?.({ phase: "writing index files", done: ++indexFilesWritten, total: indexFiles.length, unit: "count" });
   }
-  writeFileSync(path.join(resolved.output, "manifest.json"), JSON.stringify(manifest, null, 2));
+  // Minified, not pretty-printed: every client downloads this file before it can run a query, and
+  // the ADR-0003 §3 budget is measured on gzip(minified) — so indentation would be bytes the budget
+  // never accounted for (~2.2x the file on a real dataset). `curl | jq` reads minified JSON fine.
+  writeFileSync(path.join(resolved.output, "manifest.json"), JSON.stringify(manifest));
 
   progress?.({ phase: "generating client", done: 1, total: 1, unit: "count" });
   mkdirSync(resolved.clientOut, { recursive: true });

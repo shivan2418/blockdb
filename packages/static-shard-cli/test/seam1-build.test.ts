@@ -133,6 +133,18 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
     expect(existsSync(clientOutDir)).toBe(true);
   });
 
+  test("manifest.json is written minified — every client downloads it, so indentation is pure wire cost", () => {
+    const { manifest, outputDir } = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+
+    const onDisk = readFileSync(path.join(outputDir, "manifest.json"), "utf8");
+    // The budget in `spillOversizedZonemaps` is measured on gzip(minified), so shipping a
+    // pretty-printed file would mean the check governs bytes nobody ever downloads.
+    expect(onDisk).toBe(JSON.stringify(manifest));
+    expect(onDisk).not.toContain("\n");
+    // Still parses back to exactly the returned manifest — minifying changes bytes, never content.
+    expect(JSON.parse(onDisk)).toEqual(manifest);
+  });
+
   test("shard files are content-hash-named and their bytes/count match the manifest", () => {
     const { manifest, outputDir } = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 
