@@ -206,6 +206,38 @@ describe("applyKey — filter fields step", () => {
     const defaultScreen = rendered.split("\n").filter((l) => l.includes("[x]") || l.includes("[ ]")).length;
     expect(defaultScreen).toBe(checklistRowCount(24));
   });
+
+  test("the first-download figure carries a budget meter that fills as the manifest grows", () => {
+    const data = buildWizardData(PRODUCTS);
+    const state = toStage2(data);
+    const base = estimateForState(data, state);
+
+    // The manifest figure is an input to renderFrame, so the meter's whole fill range is drivable
+    // without synthesizing a dataset big enough to actually blow the ~1MB budget.
+    const meterFor = (gzipBytes: number, overBudget: boolean) => {
+      const estimate = { ...base, costs: { ...base.costs, manifest: { bytes: gzipBytes, gzipBytes, overBudget } } };
+      const line = renderFrame(data, state, estimate)
+        .split("\n")
+        .find((l) => l.includes("comfort limit"))!;
+      return { filled: (line.match(/█/g) ?? []).length, empty: (line.match(/░/g) ?? []).length, line };
+    };
+
+    const empty = meterFor(0, false);
+    const half = meterFor(500_000, false);
+    const full = meterFor(1_000_000, false);
+    const over = meterFor(5_000_000, true);
+
+    expect(empty.filled).toBe(0);
+    expect(half.filled).toBeGreaterThan(empty.filled);
+    expect(full.filled).toBeGreaterThan(half.filled);
+    // every state keeps the meter exactly one fixed width — over-budget clamps rather than overflowing
+    for (const m of [empty, half, full, over]) expect(m.filled + m.empty).toBe(18);
+    expect(over.filled).toBe(18);
+    expect(over.empty).toBe(0);
+    // under budget the meter is green, over budget it turns yellow alongside the figure
+    expect(full.line).toContain("\x1b[32m");
+    expect(over.line).toContain("\x1b[33m");
+  });
 });
 
 describe("applyKey — text search step", () => {

@@ -437,6 +437,19 @@ function fmtBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
+
+const BAR_WIDTH = 18;
+
+/**
+ * A how-full-is-the-budget meter for the first-download axis (ADR-0006 §3) — the number alone makes
+ * "113B of a 976.6KB comfort limit" hard to feel at a glance, where a bar reads instantly. Filled
+ * portion is clamped to the width, so going over budget renders a full bar rather than overflowing
+ * the line; the bar carries the same green/over-budget-yellow signal as the figure it annotates.
+ */
+function budgetBar(filled: number, total: number, overBudget: boolean): string {
+  const cells = Math.max(0, Math.min(BAR_WIDTH, Math.round((filled / total) * BAR_WIDTH)));
+  return color(overBudget ? ANSI.yellow : ANSI.green, "█".repeat(cells)) + dim("░".repeat(BAR_WIDTH - cells));
+}
 function fmtInt(n: number): string {
   return Math.round(n).toLocaleString("en-US");
 }
@@ -487,7 +500,7 @@ function estimateAxes(costs: CostEstimate): EstimateAxes {
 
   const firstDownload = [
     bold("  First download") + dim("  everyone loads this once, before any query"),
-    `    ${color(costs.manifest.overBudget ? ANSI.yellow : ANSI.green, fmtBytes(costs.manifest.gzipBytes))} ${dim("of a " + fmtBytes(MANIFEST_BUDGET_BYTES) + " comfort limit")}`,
+    `    ${color(costs.manifest.overBudget ? ANSI.yellow : ANSI.green, fmtBytes(costs.manifest.gzipBytes))} ${dim("of a " + fmtBytes(MANIFEST_BUDGET_BYTES) + " comfort limit")}  ${budgetBar(costs.manifest.gzipBytes, MANIFEST_BUDGET_BYTES, costs.manifest.overBudget)}`,
   ];
 
   const perQuery = [bold("  Download per query") + dim("  what a typical query pulls down")];
