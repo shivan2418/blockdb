@@ -55,6 +55,50 @@ describe("resolveConfig", () => {
     expect(resolveConfig(stringSorted, "/repo").sortField).toBe("title");
   });
 
+  test("accepts tsType on a json field and carries it through resolveConfig", () => {
+    const withPayloadType: StaticShardConfig = {
+      ...base,
+      schema: {
+        ...base.schema,
+        fields: {
+          ...base.schema.fields,
+          images: { kind: "json", tsType: "ImageUris", tsImport: 'import type { ImageUris } from "./types.js";' },
+        },
+      },
+    };
+    expect(resolveConfig(withPayloadType, "/repo").fields.images!.tsType).toBe("ImageUris");
+  });
+
+  test("rejects tsType on a scalar field — its type already follows its kind", () => {
+    const bad: StaticShardConfig = {
+      ...base,
+      schema: { ...base.schema, fields: { ...base.schema.fields, title: { kind: "string", tsType: "Brand<string>" } } },
+    };
+    expect(() => resolveConfig(bad, "/repo")).toThrow(/tsType[\s\S]*json|json[\s\S]*tsType/);
+  });
+
+  test("rejects tsImport without tsType", () => {
+    const bad: StaticShardConfig = {
+      ...base,
+      schema: {
+        ...base.schema,
+        fields: { ...base.schema.fields, images: { kind: "json", tsImport: 'import type { X } from "./x.js";' } },
+      },
+    };
+    expect(() => resolveConfig(bad, "/repo")).toThrow(/tsImport[\s\S]*tsType/);
+  });
+
+  test("accepts values on a string sort field, which is implicitly indexed", () => {
+    const sortedEnum: StaticShardConfig = {
+      ...base,
+      schema: {
+        sortField: "tier",
+        fields: { ...base.schema.fields, tier: { kind: "string", values: ["bronze", "gold", "silver"] } },
+      },
+    };
+    expect(resolveConfig(sortedEnum, "/repo").fields.tier!.values).toEqual(["bronze", "gold", "silver"]);
+  });
+
   test("rejects endsWith/contains on the sort field rather than silently dropping them", () => {
     for (const op of ["endsWith", "contains"] as const) {
       const bad: StaticShardConfig = {

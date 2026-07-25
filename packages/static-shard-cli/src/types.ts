@@ -28,6 +28,17 @@ export interface FieldConfig {
    * or delete it to widen the field back to plain `string`. Requires `kind: "string"` + `indexed: true`.
    */
   values?: string[];
+  /**
+   * The TypeScript type codegen should emit for this payload field instead of `unknown`, as a type
+   * expression (`ImageUris`, `CardFace[]`, `Record<string, string | null>`). Requires `kind: "json"`.
+   *
+   * This is an **unchecked assertion**: static-shard stores and returns the payload verbatim and
+   * never validates it against this type. You own keeping the declaration true of your data — the
+   * same deal as a database driver's row type.
+   */
+  tsType?: string;
+  /** A complete import statement emitted verbatim above the generated interface, for whatever `tsType` names. Requires `tsType`. */
+  tsImport?: string;
 }
 
 export interface StaticShardConfig {
@@ -105,6 +116,10 @@ export interface FieldSchemaEntry {
   pk?: true;
   /** The field's closed value set, for codegen's value union — omitted unless configured (mirrors the runtime's optional `FieldMeta.values`). */
   values?: readonly string[];
+  /** A payload field's declared TypeScript type, emitted in place of `unknown` — omitted unless configured. Never validated against the data. */
+  tsType?: string;
+  /** The import statement `tsType` needs, emitted verbatim above the generated interface — omitted unless configured. */
+  tsImport?: string;
 }
 
 export interface SchemaDescriptor {

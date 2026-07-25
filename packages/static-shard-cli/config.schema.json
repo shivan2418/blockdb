@@ -3,7 +3,11 @@
   "title": "static-shard config",
   "description": "static-shard.config.json — written by `static-shard-cli init`, consumed by `static-shard-cli build`.",
   "type": "object",
-  "required": ["collection", "input", "schema"],
+  "required": [
+    "collection",
+    "input",
+    "schema"
+  ],
   "additionalProperties": false,
   "properties": {
     "$schema": {
@@ -20,7 +24,9 @@
     },
     "input": {
       "type": "object",
-      "required": ["path"],
+      "required": [
+        "path"
+      ],
       "additionalProperties": false,
       "properties": {
         "path": {
@@ -28,7 +34,12 @@
           "description": "A single file path, or a glob pattern matching same-format files to merge then shard as one dataset."
         },
         "format": {
-          "enum": ["ndjson", "json", "csv", "tsv"],
+          "enum": [
+            "ndjson",
+            "json",
+            "csv",
+            "tsv"
+          ],
           "description": "Defaults to \"ndjson\"."
         },
         "delimiter": {
@@ -66,7 +77,10 @@
     "schema": {
       "type": "object",
       "description": "The machine-owned baked schema block (written/refreshed by `init`/`init --reinfer`).",
-      "required": ["sortField", "fields"],
+      "required": [
+        "sortField",
+        "fields"
+      ],
       "additionalProperties": false,
       "properties": {
         "sortField": {
@@ -79,7 +93,9 @@
         },
         "fields": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/definitions/fieldConfig" }
+          "additionalProperties": {
+            "$ref": "#/definitions/fieldConfig"
+          }
         }
       }
     }
@@ -87,11 +103,19 @@
   "definitions": {
     "fieldConfig": {
       "type": "object",
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "additionalProperties": false,
       "properties": {
         "kind": {
-          "enum": ["string", "number", "boolean", "date", "json"],
+          "enum": [
+            "string",
+            "number",
+            "boolean",
+            "date",
+            "json"
+          ],
           "description": "\"json\" is payload-only: carried in each record but never indexed or queryable."
         },
         "indexed": {
@@ -116,42 +140,199 @@
         },
         "values": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "minItems": 1,
           "uniqueItems": true,
           "description": "The field's closed value set. Codegen exports it as a named union and narrows equals/in/some to it (fragment operators startsWith/contains/endsWith stay wide). Inferred for enum-like fields; delete it to widen the field back to plain string. Requires kind \"string\" and indexed: true."
+        },
+        "tsType": {
+          "type": "string",
+          "description": "For \"json\" fields only: the TypeScript type codegen emits instead of `unknown`, as a type expression (e.g. \"ImageUris\", \"CardFace[]\", \"Record<string, string | null>\"). An UNCHECKED assertion — static-shard stores and returns the payload verbatim and never validates it against this type."
+        },
+        "tsImport": {
+          "type": "string",
+          "description": "A complete import statement emitted verbatim above the generated interface, for whatever `tsType` names (e.g. 'import type { ImageUris } from \"../types/scryfall.js\";'). Requires `tsType`. Identical statements across fields are emitted once."
         }
       },
       "allOf": [
         {
-          "if": { "required": ["endsWith"], "properties": { "endsWith": { "const": true } } },
-          "then": { "required": ["indexed"], "properties": { "kind": { "const": "string" }, "indexed": { "const": true } } }
+          "if": {
+            "required": [
+              "endsWith"
+            ],
+            "properties": {
+              "endsWith": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "indexed"
+            ],
+            "properties": {
+              "kind": {
+                "const": "string"
+              },
+              "indexed": {
+                "const": true
+              }
+            }
+          }
         },
         {
-          "if": { "required": ["contains"], "properties": { "contains": { "const": true } } },
-          "then": { "required": ["indexed"], "properties": { "kind": { "const": "string" }, "indexed": { "const": true } } }
+          "if": {
+            "required": [
+              "contains"
+            ],
+            "properties": {
+              "contains": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "indexed"
+            ],
+            "properties": {
+              "kind": {
+                "const": "string"
+              },
+              "indexed": {
+                "const": true
+              }
+            }
+          }
         },
         {
-          "if": { "required": ["multi"], "properties": { "multi": { "const": true } } },
-          "then": { "required": ["indexed"], "properties": { "kind": { "const": "string" }, "indexed": { "const": true } } }
+          "if": {
+            "required": [
+              "multi"
+            ],
+            "properties": {
+              "multi": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "indexed"
+            ],
+            "properties": {
+              "kind": {
+                "const": "string"
+              },
+              "indexed": {
+                "const": true
+              }
+            }
+          }
         },
         {
-          "if": { "required": ["absent"], "properties": { "absent": { "const": true } } },
-          "then": { "required": ["indexed"], "properties": { "indexed": { "const": true } } }
+          "if": {
+            "required": [
+              "absent"
+            ],
+            "properties": {
+              "absent": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "indexed"
+            ],
+            "properties": {
+              "indexed": {
+                "const": true
+              }
+            }
+          }
         },
         {
-          "if": { "required": ["values"] },
-          "then": { "required": ["indexed"], "properties": { "kind": { "const": "string" }, "indexed": { "const": true } } }
+          "if": {
+            "required": [
+              "values"
+            ]
+          },
+          "then": {
+            "required": [
+              "indexed"
+            ],
+            "properties": {
+              "kind": {
+                "const": "string"
+              },
+              "indexed": {
+                "const": true
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "kind": { "const": "json" } } },
-          "then": { "not": { "anyOf": [
-            { "required": ["indexed"], "properties": { "indexed": { "const": true } } },
-            { "required": ["endsWith"], "properties": { "endsWith": { "const": true } } },
-            { "required": ["contains"], "properties": { "contains": { "const": true } } },
-            { "required": ["multi"], "properties": { "multi": { "const": true } } },
-            { "required": ["values"] }
-          ] } }
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "json"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "indexed"
+                  ],
+                  "properties": {
+                    "indexed": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "endsWith"
+                  ],
+                  "properties": {
+                    "endsWith": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "contains"
+                  ],
+                  "properties": {
+                    "contains": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "multi"
+                  ],
+                  "properties": {
+                    "multi": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "values"
+                  ]
+                }
+              ]
+            }
+          }
         }
       ]
     }

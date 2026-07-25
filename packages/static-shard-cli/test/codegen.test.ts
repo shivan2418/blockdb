@@ -146,6 +146,67 @@ describe("generateSchemaTs — payload-only json fields", () => {
   });
 });
 
+describe("generateSchemaTs — tsType escape hatch for json payloads", () => {
+  const typed: Manifest = {
+    ...manifest,
+    schema: {
+      ...manifest.schema,
+      fields: {
+        ...manifest.schema.fields,
+        image_uris: {
+          kind: "json",
+          isDate: false,
+          indexed: false,
+          operators: [],
+          tsType: "ImageUris",
+          tsImport: 'import type { ImageUris } from "../types/scryfall.js";',
+        },
+        prices: {
+          kind: "json",
+          isDate: false,
+          indexed: false,
+          operators: [],
+          tsType: "Record<string, string | null>",
+        },
+        // a second field importing from the same module must not duplicate the import
+        card_faces: {
+          kind: "json",
+          isDate: false,
+          indexed: false,
+          operators: [],
+          tsType: "CardFace[]",
+          tsImport: 'import type { ImageUris } from "../types/scryfall.js";',
+        },
+      },
+    },
+  };
+  const output = generateSchemaTs(typed, "0.1.0");
+
+  test("uses the declared type instead of `unknown`", () => {
+    expect(output).toMatch(/image_uris\?:\s*ImageUris;/);
+    expect(output).not.toMatch(/image_uris\?:\s*unknown;/);
+  });
+
+  test("accepts an arbitrary type expression, not just a bare name", () => {
+    expect(output).toMatch(/prices\?:\s*Record<string, string \| null>;/);
+  });
+
+  test("emits each distinct tsImport once, above the interface", () => {
+    const importLine = 'import type { ImageUris } from "../types/scryfall.js";';
+    expect(output.split(importLine)).toHaveLength(2); // exactly one occurrence
+    expect(output.indexOf(importLine)).toBeLessThan(output.indexOf("export interface Movies"));
+  });
+
+  test("a tsType field stays optional — static-shard never tracks json presence, so it can't promise more", () => {
+    expect(output).toMatch(/prices\?:/);
+  });
+
+  test("declaring a type does not make the field queryable", () => {
+    const schemaBlock = output.slice(output.indexOf("export const schema"));
+    expect(schemaBlock).not.toContain("image_uris");
+  });
+});
+
 describe("codegen — collection names that aren't valid identifiers", () => {
   const gnarly: Manifest = {
     ...manifest,

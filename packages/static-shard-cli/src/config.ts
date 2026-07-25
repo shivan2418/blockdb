@@ -82,9 +82,9 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
           `static-shard: field "${name}" declares "values" but is kind "${field.kind}" — a value union requires kind: "string"`,
         );
       }
-      // No sort-field exemption needed: `values` requires kind "string", and a sort field must be
-      // number/date, so a valued field is always a secondary field that has to be indexed.
-      if (field.indexed !== true) {
+      // The sort field is implicitly indexed (it prunes via split-points), so it needs no explicit
+      // `indexed: true` — and since string sort fields are allowed, it can legitimately be valued.
+      if (field.indexed !== true && !isSortField) {
         throw new Error(
           `static-shard: field "${name}" declares "values" but is not indexed — a value union only narrows queryable fields, so set indexed: true or remove "values"`,
         );
@@ -100,6 +100,25 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
           `static-shard: field "${name}" declares duplicate "values" entries (${[...new Set(duplicates)].join(", ")}) — each value must appear once`,
         );
       }
+    }
+
+    // `tsType` is a codegen-only convenience for payload fields. It is deliberately NOT allowed on
+    // scalar kinds: those already have a precise type, and overriding it would desynchronize the
+    // record interface from the `where` operators the runtime actually applies to that field.
+    if (field.tsType !== undefined) {
+      if (field.kind !== "json") {
+        throw new Error(
+          `static-shard: field "${name}" declares "tsType" but is kind "${field.kind}" — tsType only applies to payload-only "json" fields, whose type would otherwise be "unknown". A scalar field's type already follows its kind.`,
+        );
+      }
+      if (field.tsType.trim() === "") {
+        throw new Error(`static-shard: field "${name}" declares an empty "tsType" — remove it to leave the field typed as unknown`);
+      }
+    }
+    if (field.tsImport !== undefined && field.tsType === undefined) {
+      throw new Error(
+        `static-shard: field "${name}" declares "tsImport" without "tsType" — the import would name a type nothing uses`,
+      );
     }
 
     if (field.endsWith || field.contains) {

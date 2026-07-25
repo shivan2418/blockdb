@@ -245,6 +245,15 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       // A multi field can't also be `absent`: T7 has no presence semantics over a string[]'s
       // elements, and config validation rejects the combination (config.ts).
       if (f.absent && isIndexed && !f.multi) cfg.absent = true;
+      // `tsType`/`tsImport` are the one part of a field config inference can never produce — the user
+      // hand-writes them. `--reinfer` re-reads the DATA's shape, so carry them over rather than
+      // silently discarding work. Dropped if the field stopped being a payload field, since a scalar
+      // kind can't carry a tsType (config.ts rejects it).
+      const priorField = existing?.schema.fields[name];
+      if (f.kind === "json" && priorField?.tsType !== undefined) {
+        cfg.tsType = priorField.tsType;
+        if (priorField.tsImport !== undefined) cfg.tsImport = priorField.tsImport;
+      }
       fields[name] = cfg;
     }
   } else {

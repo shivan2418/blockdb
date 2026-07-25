@@ -1059,6 +1059,28 @@ describe("seam #1 — asking to index a payload-only json field degrades gracefu
     writeFileSync(path.join(dir, "nested.ndjson"), NESTED.map((p) => JSON.stringify(p)).join("\n") + "\n");
   }
 
+  test("--reinfer keeps a hand-authored tsType on a json field", () => {
+    writeNested(tmpDir);
+    const configPath = path.join(tmpDir, "static-shard.config.json");
+
+    init({ cwd: tmpDir, configPath, yes: true, fullScan: true, inputPath: "nested.ndjson" });
+
+    // the user hand-adds a payload type, as the docs tell them to
+    const authored = JSON.parse(readFileSync(configPath, "utf8")) as StaticShardConfig;
+    authored.schema.fields.prices = {
+      kind: "json",
+      tsType: "Prices",
+      tsImport: 'import type { Prices } from "../types/prices.js";',
+    };
+    writeFileSync(configPath, JSON.stringify(authored, null, 2));
+
+    // --reinfer rediscovers the DATA's shape; it must not discard declarations only the user can make
+    const { config } = init({ cwd: tmpDir, configPath, yes: true, fullScan: true, reinfer: true });
+
+    expect(config.schema.fields.prices?.tsType).toBe("Prices");
+    expect(config.schema.fields.prices?.tsImport).toBe('import type { Prices } from "../types/prices.js";');
+  });
+
   test("--indexed naming a json field drops just that field and still writes a usable config", () => {
     writeNested(tmpDir);
     const configPath = path.join(tmpDir, "static-shard.config.json");

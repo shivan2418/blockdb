@@ -37,6 +37,33 @@ The single biggest lever on query cost. Records are range-partitioned by this on
 
 An index can be small and useless, or large and worth it, so the two warnings are independent. Text matching is also **case-sensitive** with no folded index — see the [runtime README](https://www.npmjs.com/package/static-shard#text-matching-is-case-sensitive).
 
+### Typing json payloads
+
+Fields of `kind: "json"` are payload-only: stored and returned in full, but not queryable (only indexed fields are). Codegen types them as `unknown`, which is honest but means the part of the record holding your nested data is the one part that isn't typed. Declare a `tsType` to fix that:
+
+```jsonc
+{
+  "image_uris": {
+    "kind": "json",
+    "tsType": "ImageUris",
+    "tsImport": "import type { ImageUris } from \"../types/scryfall.js\";"
+  },
+  "prices": { "kind": "json", "tsType": "Record<string, string | null>" }
+}
+```
+
+```ts
+card.image_uris?.small;  // string | undefined — checked, not `unknown`
+card.image_uris?.smalll; // compile error
+```
+
+- `tsType` is any type expression (`ImageUris`, `CardFace[]`, a `Record<…>`), emitted verbatim.
+- `tsImport` is a complete import statement, emitted above the interface. Identical statements across fields are emitted once, so several payload fields can share one module. **The path is relative to `clientOut`** (default `src/shard-db/`), not to the config.
+- Payload fields stay **optional** even with a declared type. static-shard never tracks presence for `json` fields, so it can't promise the key exists.
+- `init --reinfer` preserves both — they're the one part of a field config inference can't produce.
+
+This is an **unchecked assertion**. static-shard relays the payload verbatim and never validates it against the type you declared; keeping the declaration true of your data is your job, exactly as with a database driver's row type. Validation stays out of scope.
+
 See the [project README](https://github.com/shivan2418/static-shard#readme) for the full pitch and design, and [`examples/`](https://github.com/shivan2418/static-shard/tree/master/examples) for two complete example apps built with this CLI.
 
 ## License

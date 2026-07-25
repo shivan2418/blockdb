@@ -94,6 +94,8 @@ function buildSchemaDescriptor(config: ResolvedConfig): SchemaDescriptor {
       ...(field.multi === true ? { multi: true as const } : {}),
       ...(name === config.pk ? { pk: true as const } : {}),
       ...(field.values !== undefined ? { values: field.values } : {}),
+      ...(field.tsType !== undefined ? { tsType: field.tsType } : {}),
+      ...(field.tsImport !== undefined ? { tsImport: field.tsImport } : {}),
     };
   }
   return {
