@@ -57,14 +57,30 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
       const multi = field.multi ? ", multi: true" : "";
       const absent = field.absent ? ", absent: true" : "";
       const pk = field.pk ? ", pk: true" : "";
-      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${pk} },`;
+      // The runtime reads this tuple to narrow equals/in/some to the field's value union.
+      const values = field.values ? `, values: [${field.values.map((v) => JSON.stringify(v)).join(", ")}]` : "";
+      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${pk}${values} },`;
     })
     .join("\n");
 
   const pkLine = manifest.schema.pk !== undefined ? `    pk: ${JSON.stringify(manifest.schema.pk)},\n` : "";
 
+  /**
+   * A named union per enum-like field, exported so app code can use it directly (a filter
+   * component's prop, a dropdown's options) instead of hand-rolling the same literal union. The
+   * record interface deliberately keeps these fields as plain `string` — see `tsTypeForKind`.
+   */
+  const valueUnions = fieldEntries
+    .filter(([, field]) => field.indexed && field.values !== undefined)
+    .map(([name, field]) => {
+      const union = field.values!.map((v) => JSON.stringify(v)).join(" | ");
+      return `export type ${typeName}${typeNameFor(name)} = ${union};`;
+    })
+    .join("\n");
+  const valueUnionBlock = valueUnions ? `${valueUnions}\n\n` : "";
+
   return `${generatedHeader(generatorVersion)}
-export interface ${typeName} {
+${valueUnionBlock}export interface ${typeName} {
 ${interfaceLines}
 }
 

@@ -286,3 +286,35 @@ describe("resolveConfig — pk opt-in (T8)", () => {
     expect(() => resolveConfig(bad, "/repo")).toThrow(/title.*present|present.*title/i);
   });
 });
+
+describe("resolveConfig — enum-like value unions", () => {
+  const withField = (title: Record<string, unknown>): StaticShardConfig => ({
+    ...base,
+    schema: { sortField: "year", fields: { ...base.schema.fields, title: title as never } },
+  });
+
+  test("accepts a values array on an indexed string field", () => {
+    const resolved = resolveConfig(withField({ kind: "string", indexed: true, values: ["a", "b"] }), "/repo");
+    expect(resolved.fields.title).toEqual({ kind: "string", indexed: true, values: ["a", "b"] });
+  });
+
+  test("rejects values on a non-string field — only strings can be an enum", () => {
+    expect(() => resolveConfig(withField({ kind: "number", indexed: true, values: ["a"] }), "/repo")).toThrow(
+      /"values".*kind "number"|kind "number".*"values"/,
+    );
+  });
+
+  test("rejects values on a non-indexed field — a union only narrows queryable fields", () => {
+    expect(() => resolveConfig(withField({ kind: "string", values: ["a"] }), "/repo")).toThrow(/not indexed/);
+  });
+
+  test("rejects an empty values array rather than emitting an uninhabitable union", () => {
+    expect(() => resolveConfig(withField({ kind: "string", indexed: true, values: [] }), "/repo")).toThrow(/empty/);
+  });
+
+  test("rejects duplicate values", () => {
+    expect(() => resolveConfig(withField({ kind: "string", indexed: true, values: ["a", "b", "a"] }), "/repo")).toThrow(
+      /duplicate/,
+    );
+  });
+});

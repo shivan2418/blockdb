@@ -87,6 +87,7 @@ function buildSchemaDescriptor(config: ResolvedConfig): SchemaDescriptor {
       ...(field.absent === true ? { absent: true as const } : {}),
       ...(field.multi === true ? { multi: true as const } : {}),
       ...(name === config.pk ? { pk: true as const } : {}),
+      ...(field.values !== undefined ? { values: field.values } : {}),
     };
   }
   return {

@@ -108,7 +108,11 @@ function applyFieldFlagOverrides(
 
     if (indexedWanted) {
       if (indexedWanted.has(name) || mustIndex) cfg.indexed = true;
-      else delete cfg.indexed;
+      else {
+        delete cfg.indexed;
+        // A value union only narrows a queryable field, so it goes when the index does.
+        delete cfg.values;
+      }
     }
     if (endsWithWanted.has(name)) {
       cfg.indexed = true;
@@ -235,6 +239,8 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       const cfg: FieldConfig = { kind: f.kind };
       const isIndexed = f.kind !== "json" && name !== sortField && (defaultIndexed.has(name) || f.multi);
       if (isIndexed) cfg.indexed = true;
+      // Only a queryable field's values are worth baking — that's what the union narrows.
+      if (isIndexed && f.values) cfg.values = f.values;
       if (f.multi) cfg.multi = true;
       // A multi field can't also be `absent`: T7 has no presence semantics over a string[]'s
       // elements, and config validation rejects the combination (config.ts).

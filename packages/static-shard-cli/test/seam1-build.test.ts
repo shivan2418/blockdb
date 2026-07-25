@@ -521,6 +521,92 @@ void invalid;
     assertConsumerCompiles(clientOutDir, consumerSource);
   });
 
+  test("value unions: tsc exits 0 for a consumer using the exported union and rejecting non-members", () => {
+    const enumConfig: StaticShardConfig = {
+      ...indexedConfig,
+      schema: {
+        sortField: "year",
+        fields: {
+          year: { kind: "number" },
+          // An enum-like field: a closed set, so equals/in narrow to it.
+          rating: { kind: "number", indexed: true },
+          certification: { kind: "string", indexed: true, values: ["G", "PG", "R"] },
+          // Same but multi-valued, so the narrowing has to reach `some` too. `contains` is opted in
+          // to prove fragment operators stay wide even on a valued field.
+          genres: { kind: "string", indexed: true, multi: true, values: ["Drama", "SciFi"] },
+          director: { kind: "string", indexed: true, contains: true, values: ["Nolan", "Villeneuve"] },
+        },
+      },
+    };
+    writeFileSync(
+      path.join(tmpDir, "movies.ndjson"),
+      MOVIES.map((m, i) => JSON.stringify({ ...m, certification: "PG", genres: ["Drama"], director: i ? "Nolan" : "Villeneuve" })).join("\n") + "\n",
+    );
+    const { clientOutDir, manifest } = build(enumConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+
+    // the values reach the manifest, so a rebuild replays them without re-inferring
+    expect(manifest.schema.fields.certification?.values).toEqual(["G", "PG", "R"]);
+    expect(manifest.schema.fields.rating?.values).toBeUndefined();
+
+    const consumerSource = `
+import { connect } from "./client.js";
+import type { MoviesCertification, MoviesGenres } from "./schema.js";
+
+const db = connect();
+
+async function valid() {
+  // The exported unions are importable app-side — the DX this exists for.
+  const cert: MoviesCertification = "PG";
+  const genre: MoviesGenres = "Drama";
+
+  await db.movies.findMany({ where: { certification: { equals: "R" } } });
+  await db.movies.findMany({ where: { certification: { in: ["G", "PG"] } } });
+  await db.movies.findMany({ where: { certification: { equals: cert } } });
+  await db.movies.findMany({ where: { genres: { some: genre } } });
+  await db.movies.findMany({ where: { genres: { some: { equals: "SciFi" } } } });
+
+  // Fragment operators must stay wide: a substring of an enum member isn't a member.
+  await db.movies.findMany({ where: { director: { contains: "olan" } } });
+  await db.movies.findMany({ where: { certification: { startsWith: "P" } } });
+
+  // A field with no baked values keeps accepting any number/string.
+  await db.movies.findMany({ where: { rating: { equals: 9.5 } } });
+
+  // The RECORD stays wide — a value outside the union is still legal data.
+  const { records } = await db.movies.findMany();
+  const raw: string = records[0]!.certification;
+  void raw;
+}
+
+async function invalid() {
+  // not a member of the certification union
+  // @ts-expect-error
+  await db.movies.findMany({ where: { certification: { equals: "NC-17" } } });
+
+  // not a member, inside \`in\`
+  // @ts-expect-error
+  await db.movies.findMany({ where: { certification: { in: ["G", "NC-17"] } } });
+
+  // not a member, via a multi field's \`some\` shorthand
+  // @ts-expect-error
+  await db.movies.findMany({ where: { genres: { some: "Horror" } } });
+
+  // not a member, via \`some: { equals }\`
+  // @ts-expect-error
+  await db.movies.findMany({ where: { genres: { some: { equals: "Horror" } } } });
+
+  // and the exported union itself rejects a non-member
+  // @ts-expect-error
+  const bad: MoviesCertification = "NC-17";
+  void bad;
+}
+
+void valid;
+void invalid;
+`;
+    assertConsumerCompiles(clientOutDir, consumerSource);
+  });
+
   test("T6: tsc exits 0 for a consumer exercising endsWith/contains only where opted in, per-operator", () => {
     const t6Config: StaticShardConfig = {
       ...indexedConfig,

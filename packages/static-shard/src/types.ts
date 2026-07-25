@@ -16,6 +16,12 @@ export interface FieldMeta {
   readonly pk?: boolean;
   /** Value can be missing → is null / is absent / exists surface. */
   readonly absent?: boolean;
+  /**
+   * The field's observed value set, baked in by codegen for low-cardinality string fields (an
+   * "enum-like" field: MTG colours, a rarity, a status). Narrows the *equality-shaped* operators so
+   * they autocomplete; absent → those operators accept any `string`.
+   */
+  readonly values?: readonly string[];
 }
 
 export interface CollectionMeta {
@@ -32,10 +38,16 @@ export interface SchemaMeta {
 // Per-kind operator → value-type tables. The FULL set; a field exposes only
 // the subset its `operators` tuple names (config-driven, ADR-0003 §7).
 // ---------------------------------------------------------------------------
-type AllStringOps = {
-  equals: string;
-  not: string; // filter-only rider
-  in: string[];
+/**
+ * `V` is the field's value union when codegen baked one in (else `string`). Only the
+ * equality-shaped operators narrow to it: `startsWith`/`contains`/`endsWith` match a *fragment* of
+ * a value, and a fragment of an enum member is not itself an enum member — narrowing those would
+ * reject `contains: "art"` against a value of `"artifact"`.
+ */
+type AllStringOps<V extends string = string> = {
+  equals: V;
+  not: V; // filter-only rider
+  in: V[];
   startsWith: string;
   contains: string; // opt-in (trigram index) + prunes
   endsWith: string; // opt-in (reversed index) + prunes
@@ -70,13 +82,20 @@ type PickOps<All, Ops extends string> = {
 
 type AbsentOps<F> = F extends { absent: true } ? { isNull?: true; isAbsent?: true; exists?: boolean } : {};
 
+/**
+ * A field's baked value union, or `string` when codegen didn't bake one (high-cardinality field, or
+ * a schema typed loosely as `SchemaMeta` rather than an `as const` literal — which degrades to the
+ * previous wide behavior rather than breaking).
+ */
+type ValuesOf<F extends FieldMeta> = F extends { values: readonly (infer V extends string)[] } ? V : string;
+
 /** `{ some: value }` ≡ `{ some: { equals: value } }` (ADR-0001) — only offered where `equals` is itself enabled. */
-type SomeShorthand<F extends FieldMeta> = "equals" extends F["operators"][number] ? string : never;
+type SomeShorthand<F extends FieldMeta> = "equals" extends F["operators"][number] ? ValuesOf<F> : never;
 
 type FilterFor<F extends FieldMeta> = F extends { kind: "string"; multi: true }
-  ? { some?: PickOps<AllStringOps, F["operators"][number]> | SomeShorthand<F> }
+  ? { some?: PickOps<AllStringOps<ValuesOf<F>>, F["operators"][number]> | SomeShorthand<F> }
   : F extends { kind: "string" }
-    ? PickOps<AllStringOps, F["operators"][number]> & AbsentOps<F>
+    ? PickOps<AllStringOps<ValuesOf<F>>, F["operators"][number]> & AbsentOps<F>
     : F extends { kind: "number" }
       ? PickOps<AllNumberOps, F["operators"][number]> & AbsentOps<F>
       : F extends { kind: "date" }

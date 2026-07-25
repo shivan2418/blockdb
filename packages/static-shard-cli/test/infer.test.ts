@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { inferSchema } from "../src/infer.js";
+import { MAX_ENUM_VALUES, inferSchema } from "../src/infer.js";
 
 describe("inferSchema — field kind detection", () => {
   test("infers number/string/boolean from consistent sample values", () => {
@@ -109,6 +109,55 @@ describe("inferSchema — cardinality / absent / multi", () => {
     expect(fields.multiverseIds!.kind).toBe("json");
     expect(fields.multiverseIds!.multi).toBe(false);
     expect(fields.parts!.kind).toBe("json");
+  });
+});
+
+describe("inferSchema — enum-like value sets", () => {
+  const rarities = ["common", "uncommon", "rare", "mythic"];
+
+  test("collects sorted distinct values for a low-cardinality string field", () => {
+    const records = Array.from({ length: 40 }, (_, i) => ({ id: `c${i}`, cmc: i, rarity: rarities[i % 4]! }));
+    expect(inferSchema(records).fields.rarity!.values).toEqual(["common", "mythic", "rare", "uncommon"]);
+  });
+
+  test("collects the distinct ELEMENTS of a multi-valued field, not the distinct arrays", () => {
+    const records = [
+      { id: "a", cmc: 1, colors: ["W", "U"] },
+      { id: "b", cmc: 2, colors: ["U"] },
+      { id: "c", cmc: 3, colors: ["B", "W"] },
+    ];
+    const field = inferSchema(records).fields.colors!;
+    expect(field.multi).toBe(true);
+    expect(field.values).toEqual(["B", "U", "W"]);
+  });
+
+  test("omits values once a field exceeds the enum threshold — a growing field must stay wide", () => {
+    const wide = Array.from({ length: 200 }, (_, i) => ({ id: `c${i}`, cmc: i, setCode: `s${i % (MAX_ENUM_VALUES + 1)}` }));
+    expect(inferSchema(wide).fields.setCode!.values).toBeUndefined();
+
+    const atLimit = Array.from({ length: 200 }, (_, i) => ({ id: `c${i}`, cmc: i, code: `s${i % MAX_ENUM_VALUES}` }));
+    expect(inferSchema(atLimit).fields.code!.values).toHaveLength(MAX_ENUM_VALUES);
+  });
+
+  test("omits values for non-string kinds — numbers, booleans and dates are never enums", () => {
+    const records = [
+      { id: "a", cmc: 1, live: true, released: "2020-01-01" },
+      { id: "b", cmc: 2, live: false, released: "2021-01-01" },
+    ];
+    const fields = inferSchema(records).fields;
+    expect(fields.cmc!.values).toBeUndefined();
+    expect(fields.live!.values).toBeUndefined();
+    expect(fields.released!.kind).toBe("date");
+    expect(fields.released!.values).toBeUndefined();
+  });
+
+  test("ignores nulls when collecting values", () => {
+    const records = [
+      { id: "a", cmc: 1, rarity: "rare" },
+      { id: "b", cmc: 2, rarity: null },
+      { id: "c", cmc: 3, rarity: "common" },
+    ];
+    expect(inferSchema(records).fields.rarity!.values).toEqual(["common", "rare"]);
   });
 });
 

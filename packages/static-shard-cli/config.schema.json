@@ -113,6 +113,13 @@
         "multi": {
           "type": "boolean",
           "description": "Scalar leaf under an object-array — record value is string[], matched existentially via `some`. Requires kind \"string\" and indexed: true."
+        },
+        "values": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "The field's closed value set. Codegen exports it as a named union and narrows equals/in/some to it (fragment operators startsWith/contains/endsWith stay wide). Inferred for enum-like fields; delete it to widen the field back to plain string. Requires kind \"string\" and indexed: true."
         }
       },
       "allOf": [
@@ -133,12 +140,17 @@
           "then": { "required": ["indexed"], "properties": { "indexed": { "const": true } } }
         },
         {
+          "if": { "required": ["values"] },
+          "then": { "required": ["indexed"], "properties": { "kind": { "const": "string" }, "indexed": { "const": true } } }
+        },
+        {
           "if": { "properties": { "kind": { "const": "json" } } },
           "then": { "not": { "anyOf": [
             { "required": ["indexed"], "properties": { "indexed": { "const": true } } },
             { "required": ["endsWith"], "properties": { "endsWith": { "const": true } } },
             { "required": ["contains"], "properties": { "contains": { "const": true } } },
-            { "required": ["multi"], "properties": { "multi": { "const": true } } }
+            { "required": ["multi"], "properties": { "multi": { "const": true } } },
+            { "required": ["values"] }
           ] } }
         }
       ]

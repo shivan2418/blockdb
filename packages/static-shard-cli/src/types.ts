@@ -22,6 +22,12 @@ export interface FieldConfig {
   absent?: boolean;
   /** Scalar leaf under an object-array — record value is `string[]`, matched existentially via `some` (T7). Requires `kind: "string"` and `indexed: true`. */
   multi?: boolean;
+  /**
+   * The field's closed value set. Codegen emits it as a value union, narrowing the equality-shaped
+   * operators (`equals`/`in`/`some`) so they autocomplete. Inferred for enum-like string fields; edit
+   * or delete it to widen the field back to plain `string`. Requires `kind: "string"` + `indexed: true`.
+   */
+  values?: string[];
 }
 
 export interface StaticShardConfig {
@@ -97,6 +103,8 @@ export interface FieldSchemaEntry {
   multi?: true;
   /** Present (`true`) only for the user PK field (T8) — omitted otherwise, mirroring the runtime's optional `FieldMeta.pk`. */
   pk?: true;
+  /** The field's closed value set, for codegen's value union — omitted unless configured (mirrors the runtime's optional `FieldMeta.values`). */
+  values?: readonly string[];
 }
 
 export interface SchemaDescriptor {

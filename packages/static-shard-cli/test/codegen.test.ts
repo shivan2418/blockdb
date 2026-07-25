@@ -169,3 +169,81 @@ describe("codegen — collection names that aren't valid identifiers", () => {
     expect(client).not.toMatch(/\n\s*default-cards-20260721211623:/);
   });
 });
+
+describe("generateSchemaTs — enum-like value unions", () => {
+  const valued: Manifest = {
+    ...manifest,
+    schema: {
+      ...manifest.schema,
+      fields: {
+        ...manifest.schema.fields,
+        certification: {
+          kind: "string",
+          isDate: false,
+          indexed: true,
+          operators: ["equals", "in", "startsWith"],
+          values: ["G", "PG", "R"],
+        },
+        genres: {
+          kind: "string",
+          isDate: false,
+          indexed: true,
+          operators: ["equals", "in", "startsWith"],
+          multi: true,
+          values: ["Drama", "SciFi"],
+        },
+      },
+    },
+  };
+  const output = generateSchemaTs(valued, "0.1.0");
+
+  test("exports a named union per valued field, so app code can import it", () => {
+    expect(output).toContain('export type MoviesCertification = "G" | "PG" | "R";');
+    expect(output).toContain('export type MoviesGenres = "Drama" | "SciFi";');
+  });
+
+  test("carries the values into the schema descriptor, where the runtime narrows from", () => {
+    expect(output).toContain('values: ["G", "PG", "R"]');
+    expect(output).toContain('values: ["Drama", "SciFi"]');
+  });
+
+  test("leaves the RECORD field wide — a value outside the union is still valid data", () => {
+    const recordBlock = output.slice(output.indexOf("export interface Movies {"), output.indexOf("export interface Records"));
+    expect(recordBlock).toMatch(/certification:\s*string;/);
+    expect(recordBlock).toMatch(/genres:\s*string\[\];/);
+    expect(recordBlock).not.toContain('"PG"');
+  });
+
+  test("emits no union for a field without values", () => {
+    expect(output).not.toContain("export type MoviesYear");
+    expect(output).not.toContain("export type MoviesTitle");
+  });
+
+  test("a manifest with no valued fields emits no union block at all", () => {
+    const plain = generateSchemaTs(manifest, "0.1.0");
+    expect(plain).not.toContain("export type Movies" + "Year");
+    expect(plain.split("\n")[1]).toBe("export interface Movies {");
+  });
+
+  test("sanitizes a field name that isn't a valid identifier into the union's type name", () => {
+    const gnarly: Manifest = {
+      ...manifest,
+      schema: {
+        ...manifest.schema,
+        fields: {
+          ...manifest.schema.fields,
+          "border-color": {
+            kind: "string",
+            isDate: false,
+            indexed: true,
+            operators: ["equals"],
+            values: ["black", "white"],
+          },
+        },
+      },
+    };
+    const out = generateSchemaTs(gnarly, "0.1.0");
+    expect(out).toContain('export type MoviesBorder_color = "black" | "white";');
+    expect(out).toContain('"border-color": { kind: "string"');
+  });
+});

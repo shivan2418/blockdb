@@ -9,6 +9,15 @@ const ID_LIKE_NAME_RE = /(^_?id$)|([._-]?id$)/i;
 /** ADR-0006 §5: `init` recommends a *small* default indexed set, not opt-out-of-everything. */
 const DEFAULT_MAX_INDEXED = 3;
 
+/**
+ * A string field with at most this many distinct values is treated as enum-like, and its values are
+ * baked into the config so codegen can emit a value union (MTG colours, a rarity, a status).
+ * Deliberately conservative: it should catch closed sets and miss fields that merely *happen* to be
+ * small right now — a set code (dozens, grows every release) or an artist name must stay wide, since
+ * a union narrows `equals`/`in`/`some` and a stale one rejects a legitimate query.
+ */
+export const MAX_ENUM_VALUES = 16;
+
 export interface InferredField {
   kind: FieldKind;
   /** Distinct non-null values observed (for multi fields: distinct elements across all arrays). */
@@ -17,6 +26,11 @@ export interface InferredField {
   absent: boolean;
   /** Every observed value was a string[] — a scalar leaf under an object-array (ADR-0001). */
   multi: boolean;
+  /**
+   * Sorted distinct values, present only for enum-like string fields (≤ `MAX_ENUM_VALUES` distinct).
+   * Drives codegen's value union; omitted for every other field so they stay typed as plain `string`.
+   */
+  values?: string[];
 }
 
 export interface InferenceResult {
@@ -67,6 +81,18 @@ function payloadField(presentValues: unknown[], recordCount: number): InferredFi
   };
 }
 
+/**
+ * The sorted distinct values of an enum-like string field, or `undefined` when the field isn't one.
+ * `date` is excluded deliberately: a closed set of dates is a coincidence of the sample, not a
+ * domain enum, and freezing it would reject any later date.
+ */
+function enumValuesOf(kind: FieldKind, values: string[]): string[] | undefined {
+  if (kind !== "string") return undefined;
+  const distinct = [...new Set(values)];
+  if (distinct.length === 0 || distinct.length > MAX_ENUM_VALUES) return undefined;
+  return distinct.sort();
+}
+
 function inferField(fieldName: string, presentValues: unknown[], recordCount: number): InferredField {
   const arrays = presentValues.filter((v) => Array.isArray(v));
   const scalars = presentValues.filter((v) => !Array.isArray(v));
@@ -82,19 +108,25 @@ function inferField(fieldName: string, presentValues: unknown[], recordCount: nu
       return payloadField(presentValues, recordCount);
     }
     const elements = (arrays as string[][]).flat();
+    const elementValues = enumValuesOf("string", elements);
     return {
       kind: "string",
       cardinality: distinctCount(elements),
       absent: presentValues.length < recordCount,
       multi: true,
+      ...(elementValues ? { values: elementValues } : {}),
     };
   }
 
+  const kind = inferKind(fieldName, scalars);
+  const nonNull = scalars.filter((v) => v !== null);
+  const values = enumValuesOf(kind, nonNull.filter((v): v is string => typeof v === "string"));
   return {
-    kind: inferKind(fieldName, scalars),
-    cardinality: distinctCount(scalars.filter((v) => v !== null)),
+    kind,
+    cardinality: distinctCount(nonNull),
     absent: presentValues.length < recordCount,
     multi: false,
+    ...(values ? { values } : {}),
   };
 }
 

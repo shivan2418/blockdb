@@ -50,6 +50,32 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
       );
     }
 
+    if (field.values !== undefined) {
+      if (field.kind !== "string") {
+        throw new Error(
+          `static-shard: field "${name}" declares "values" but is kind "${field.kind}" — a value union requires kind: "string"`,
+        );
+      }
+      // No sort-field exemption needed: `values` requires kind "string", and a sort field must be
+      // number/date, so a valued field is always a secondary field that has to be indexed.
+      if (field.indexed !== true) {
+        throw new Error(
+          `static-shard: field "${name}" declares "values" but is not indexed — a value union only narrows queryable fields, so set indexed: true or remove "values"`,
+        );
+      }
+      if (field.values.length === 0) {
+        throw new Error(
+          `static-shard: field "${name}" declares an empty "values" array — remove it to leave the field typed as plain string`,
+        );
+      }
+      const duplicates = field.values.filter((v, i) => field.values!.indexOf(v) !== i);
+      if (duplicates.length > 0) {
+        throw new Error(
+          `static-shard: field "${name}" declares duplicate "values" entries (${[...new Set(duplicates)].join(", ")}) — each value must appear once`,
+        );
+      }
+    }
+
     if (field.endsWith || field.contains) {
       const opt = field.endsWith ? "endsWith" : "contains";
       if (field.kind !== "string") {

@@ -65,7 +65,12 @@ Other
 
 Fields holding nested or mixed-type values become payload-only: still stored and
 returned by findMany, but not filterable. Naming one in --indexed/--ends-with/
---contains drops that flag with a warning rather than failing the run.`;
+--contains drops that flag with a warning rather than failing the run.
+
+An indexed string field with few enough distinct values is treated as enum-like:
+its values are baked into the config, codegen exports them as a named union, and
+equals/in/some narrow to it. Delete the field's "values" array in the config to
+widen it back to plain string.`;
 
 const BUILD_HELP = `static-shard build [options]
 
