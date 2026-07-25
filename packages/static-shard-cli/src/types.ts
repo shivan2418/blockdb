@@ -71,7 +71,7 @@ export interface StaticShardConfig {
   /** Target gzipped size per secondary-index chunk, in bytes. Default ~45 KB (ADR-0003 §5). */
   indexChunkBytes?: number;
   schema: {
-    /** Must name a `number` or `date` field (T2: the sole indexed field). */
+    /** Must name a `number`, `date` or `string` field — the sole range-partitioned field (ADR-0002 §2). */
     sortField: string;
     /** Names a field as the user PK — unlocks the generated client's `get(id)` (T8). */
     pk?: string;

@@ -40,7 +40,7 @@ Input
   --collection <name>       Name the generated collection (default: input filename)
 
 Schema
-  --sort-field <field>      Field to sort and range-partition by (number or date)
+  --sort-field <field>      Field to sort and range-partition by (number, date or string)
   --pk <field>              Field to use as the primary key, unlocking get(id)
   --indexed <a,b,c>         The complete set of filterable fields (replaces, not merges)
   --ends-with <a,b>         Also support endsWith on these (builds a reversed index)

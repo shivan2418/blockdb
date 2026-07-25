@@ -45,7 +45,7 @@ export interface WizardData {
   recommendedSortField: string;
   recommendedPk?: string;
   recommendedIndexed: string[];
-  /** Fields eligible as the sort field: always-present, single-valued number/date (ADR-0002 §2). */
+  /** Fields eligible as the sort field: always-present, single-valued number/date/string (ADR-0002 §2). */
   sortCandidates: string[];
   /** The (sample or full-scan) records the wizard's live estimates are profiled against. */
   records: Record<string, unknown>[];
