@@ -327,6 +327,49 @@ describe("seam #1 — endsWith (reversed index) & contains (trigram index) opt-i
     expect(warnings.some((w) => /contains\(title\)/.test(w) && /bigger than the data/i.test(w))).toBe(true);
   });
 
+  test("an unselective contains/endsWith index warns, while a selective one on the same build stays quiet", () => {
+    // 400 records over a tiny byte target => many shards, so mean-postings-per-entry is meaningful.
+    // `code` is drawn from a 4-symbol alphabet, so its ~64 distinct trigrams each recur far more
+    // often than there are shards and scatter across nearly all of them — the `id`/`uri` shape,
+    // where an index buys no pruning. (The alphabet has to be small for the same reason it is on
+    // real data: 116k UUIDs over 16 hex digits give ~800 occurrences per trigram.)
+    // `region` values run in contiguous blocks of the sort field, so each clusters into a few shards.
+    const REGIONS = ["north", "south", "east", "west", "central", "coastal", "inland", "border"];
+    const rows = Array.from({ length: 400 }, (_, i) => {
+      let x = Math.imul(i + 1, 2654435761) >>> 0;
+      x ^= x >>> 15;
+      x = Math.imul(x, 2246822519) >>> 0;
+      let code = "";
+      for (let k = 0; k < 12; k++) code += "abcd"[(x >>> (k * 2)) & 0b11];
+      return { rank: i, code, region: REGIONS[Math.floor(i / 50)]! };
+    });
+    writeFileSync(path.join(tmpDir, "rows.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+    const { manifest, warnings } = build(
+      {
+        collection: "rows",
+        input: { path: "rows.ndjson" },
+        shardBytes: 400,
+        schema: {
+          sortField: "rank",
+          fields: {
+            rank: { kind: "number" },
+            code: { kind: "string", indexed: true, contains: true },
+            region: { kind: "string", indexed: true, contains: true },
+          },
+        },
+      },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+
+    expect(manifest.shards.length).toBeGreaterThan(8);
+    const joined = warnings.join("\n");
+    expect(joined).toMatch(/contains\(code\)/);
+    expect(joined).toMatch(/prun/i);
+    // the selective field on the very same build must not be flagged
+    expect(joined).not.toMatch(/contains\(region\)/);
+  });
+
   test("a field with only endsWith opted in has no trigram structure, and vice versa", () => {
     const endsWithOnly: StaticShardConfig = {
       ...t6Config,

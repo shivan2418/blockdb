@@ -272,6 +272,25 @@ export function buildTrigramIndex(
   return buildChunksFromDictionary(collectDistinctTrigrams(groups, field, multi), chunkBytes);
 }
 
+/**
+ * Mean postings-list length across a built structure's dictionary entries — i.e. how many shards
+ * the average lookup on it resolves to. Compared against `shardCount` this is the one number that
+ * says whether an index actually *prunes*: an entry pointing at most shards buys nothing, since the
+ * query still has to fetch most of the dataset. `undefined` for an empty structure.
+ */
+export function meanPostingsLength(chunks: BuiltIndexChunk[]): number | undefined {
+  let entries = 0;
+  let postings = 0;
+  for (const chunk of chunks) {
+    const parsed = JSON.parse(chunk.content) as IndexChunkFile;
+    for (const entry of parsed.entries) {
+      entries++;
+      postings += entry.postings.length;
+    }
+  }
+  return entries === 0 ? undefined : postings / entries;
+}
+
 /** Total UTF-8 bytes of the field's raw (non-null) string values — the "size of the column" ADR-0003 §7 warns against exceeding. */
 export function computeColumnBytes(groups: Record<string, unknown>[][], field: string, multi = false): number {
   let bytes = 0;

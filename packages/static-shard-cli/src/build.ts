@@ -14,6 +14,7 @@ import {
   buildTrigramIndex,
   computeColumnBytes,
   computeSecondaryZonemap,
+  meanPostingsLength,
 } from "./secondary-index.js";
 import { cutIntoShards, materializeShards, shardRelPath } from "./shard.js";
 import type { ShardFile } from "./shard.js";
@@ -22,7 +23,13 @@ import type { OnProgress } from "./progress.js";
 import type { BuiltIndexChunk } from "./secondary-index.js";
 import type { IndexChunkDirEntry, Manifest, PairZonemapEntry, ResolvedConfig, StaticShardConfig } from "./types.js";
 import { getFormatVersion, getGeneratorVersion } from "./version.js";
-import { lowCardinalitySortFieldWarning, oversizedRecordWarning, skewedShardsWarning, sortFieldCardinalityOf } from "./warnings.js";
+import {
+  lowCardinalitySortFieldWarning,
+  oversizedRecordWarning,
+  skewedShardsWarning,
+  sortFieldCardinalityOf,
+  unselectiveTextIndexWarning,
+} from "./warnings.js";
 import { spillOversizedZonemaps } from "./zonemap-budget.js";
 
 /** Records buffered per sorted run before `externalSort` spills to disk (ADR-0002 §9) — tunable per-call for tests, not part of the persisted config (an execution concern, not a design decision). */
@@ -126,16 +133,29 @@ export function materialize(
     );
 
     if (field.endsWith) {
-      reversedChunkDirs[name] = addIndexChunks(
+      const reversedChunks = buildReversedIndex(groups, name, resolved.indexChunkBytes, multi);
+      reversedChunkDirs[name] = addIndexChunks(name, "reversed", reversedChunks);
+
+      const unselective = unselectiveTextIndexWarning(
         name,
-        "reversed",
-        buildReversedIndex(groups, name, resolved.indexChunkBytes, multi),
+        "endsWith",
+        meanPostingsLength(reversedChunks),
+        groups.length,
       );
+      if (unselective) warnings.push(unselective);
     }
 
     if (field.contains) {
       const trigramChunks = buildTrigramIndex(groups, name, resolved.indexChunkBytes, multi);
       trigramChunkDirs[name] = addIndexChunks(name, "trigram", trigramChunks);
+
+      const unselective = unselectiveTextIndexWarning(
+        name,
+        "contains",
+        meanPostingsLength(trigramChunks),
+        groups.length,
+      );
+      if (unselective) warnings.push(unselective);
 
       const trigramBytes = trigramChunks.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
       const columnBytes = computeColumnBytes(groups, name, multi);
