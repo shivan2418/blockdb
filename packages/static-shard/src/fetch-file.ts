@@ -75,14 +75,8 @@ export async function fetchJson(
   }
 }
 
-/** Fetch + text; a 2xx body that won't read is CORRUPT_DATA. */
-export async function fetchText(
-  url: string,
-  kind: FetchedFileKind,
-  fetchImpl: typeof fetch,
-  signal?: AbortSignal,
-): Promise<string> {
-  const response = await fetchOk(url, kind, fetchImpl, signal);
+/** Reads a 2xx body as text; a body that won't read is CORRUPT_DATA. */
+async function readText(response: Response, url: string): Promise<string> {
   try {
     return await response.text();
   } catch (cause) {
@@ -95,6 +89,16 @@ export async function fetchText(
   }
 }
 
+/** Fetch + text; a 2xx body that won't read is CORRUPT_DATA. */
+export async function fetchText(
+  url: string,
+  kind: FetchedFileKind,
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<string> {
+  return await readText(await fetchOk(url, kind, fetchImpl, signal), url);
+}
+
 /** The compression a served path implies. `.br` is the file suffix; `"brotli"` is the API's format name. */
 export function compressionOfPath(url: string): Compression {
   if (url.endsWith(".gz")) return "gzip";
@@ -102,12 +106,37 @@ export function compressionOfPath(url: string): Compression {
   return "none";
 }
 
+/** The `Content-Encoding` token a codec travels under — `br` on the wire, `"brotli"` to the API. */
+const CONTENT_ENCODING_TOKEN: Record<"gzip" | "brotli", string> = { gzip: "gzip", brotli: "br" };
+
+/**
+ * Whether the fetch layer has ALREADY undone this file's build-time compression.
+ *
+ * Most static hosts recognise a `.gz`/`.br` suffix and answer with the matching `Content-Encoding`
+ * (Vite's dev server, nginx `gzip_static`, most CDNs). The browser then decodes at the transport
+ * layer and hands over a plain body — while leaving the header visible on the response. Decompressing
+ * again would fail on what is already plain text, so the header is the signal to stand down.
+ *
+ * The match must be exact: a host that re-encodes our `.br` file as gzip has undone its own encoding,
+ * not the build's, and the runtime still has to do its part.
+ */
+function alreadyDecodedByTransport(response: Response, format: "gzip" | "brotli"): boolean {
+  const header = response.headers?.get("content-encoding");
+  if (!header) return false;
+  return header.split(",").some((token) => token.trim().toLowerCase() === CONTENT_ENCODING_TOKEN[format]);
+}
+
 /**
  * Fetch + decompress + text, for build-time-compressed files (ADR-0002 §8) — the native
  * `DecompressionStream` API, no library/WASM. A 2xx body that won't decompress, or won't read once
- * decompressed, is CORRUPT_DATA (same contract as `fetchText`). Unlike transport `Content-Encoding`,
- * this cannot fall back: a client whose DecompressionStream lacks the format has no second option,
- * which is why build-time compression stays opt-in.
+ * decompressed, is CORRUPT_DATA (same contract as `fetchText`).
+ *
+ * When the host serves the file under a matching `Content-Encoding`, the transport has already done
+ * the work and this returns the body as-is. That path is worth more than a mere fix: transport-level
+ * brotli is understood by every browser, whereas `DecompressionStream("brotli")` is not yet (Chrome
+ * 150 still rejects it) — so a `.br` deploy behind such a host works where a raw-bytes one cannot.
+ * Where the host serves raw bytes there is no fallback, which is why build-time compression stays
+ * opt-in.
  */
 export async function fetchCompressedText(
   url: string,
@@ -117,6 +146,7 @@ export async function fetchCompressedText(
   signal?: AbortSignal,
 ): Promise<string> {
   const response = await fetchOk(url, kind, fetchImpl, signal);
+  if (alreadyDecodedByTransport(response, format)) return await readText(response, url);
   try {
     // Cast: TypeScript's DOM lib still types CompressionFormat as gzip/deflate/deflate-raw, though
     // "brotli" is in the Compression Streams spec and shipping. The runtime check that matters is the

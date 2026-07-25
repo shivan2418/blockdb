@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { build } from "static-shard-cli";
@@ -964,3 +965,103 @@ describe("seam #2 — gzip shard payloads (T13, ADR-0002 §8)", () => {
     expect(clientTs).toMatch(/MANIFEST_COMPRESSION = "gzip"/);
   });
 });
+
+/**
+ * A host that recognises the `.gz`/`.br` suffix and answers with `Content-Encoding` — Vite's dev
+ * server, nginx `gzip_static`, and most static CDNs. The browser then decodes at the transport layer,
+ * so `response.body` is ALREADY plain and the header stays visible on the response. Bodies here are
+ * therefore served decompressed, exactly as the fetch layer would hand them over.
+ */
+function transportDecodingFetch(requests: string[], encodingOf: (url: string) => string | undefined): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const filePath = String(input);
+    requests.push(filePath);
+    try {
+      const raw = await readFile(filePath);
+      const encoding = encodingOf(filePath);
+      const body = encoding === undefined ? raw : Buffer.from(gunzipSync(raw));
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(encoding === undefined ? {} : { "content-encoding": encoding }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(body));
+            controller.close();
+          },
+        }),
+        json: async () => JSON.parse(body.toString("utf8")),
+        text: async () => body.toString("utf8"),
+      } as unknown as Response;
+    } catch {
+      return { ok: false, status: 404, headers: new Headers(), json: async () => ({}), text: async () => "" } as Response;
+    }
+  }) as typeof fetch;
+}
+
+describe("seam #2 — hosts that decode compression at the transport layer (ADR-0002 §8)", () => {
+  test("a Content-Encoding response is already plain, so the runtime must not decompress it a second time", async () => {
+    const { outputDir, clientOutDir } = build(
+      { ...config, gzip: true, output: "out-ce", clientOut: "client-ce" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const requests: string[] = [];
+    const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
+      basePath: outputDir,
+      fetch: transportDecodingFetch(requests, (url) => (url.endsWith(".gz") ? "gzip" : undefined)),
+      manifestGzip: true,
+    });
+
+    const result = await client.movies.findMany({ where: { year: { equals: 2000 } } });
+    expect(result.records.map((r) => r.title).sort()).toEqual(["Gladiator", "Memento", "Snatch"].sort());
+    expect(requests.every((u) => u.endsWith(".gz"))).toBe(true);
+  });
+
+  test("an encoding the response did NOT already apply is still decompressed by the runtime", async () => {
+    // The precise rule: skip only when the header names the SAME codec the path implies. A host that
+    // re-encodes our .gz file under a different codec has not undone the build's compression, so the
+    // runtime still has to.
+    const { outputDir, clientOutDir } = build(
+      { ...config, gzip: true, output: "out-ce2", clientOut: "client-ce2" },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const requests: string[] = [];
+    const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
+      basePath: outputDir,
+      // Header says "br" (already undone by transport) but the file is still gzip from the build.
+      fetch: diskFetchBinaryWithHeaders(requests, { "content-encoding": "br" }),
+      manifestGzip: true,
+    });
+
+    const result = await client.movies.findMany({ where: { year: { equals: 2000 } } });
+    expect(result.records.map((r) => r.title).sort()).toEqual(["Gladiator", "Memento", "Snatch"].sort());
+  });
+});
+
+/** `diskFetchBinary` with caller-supplied response headers — serves the file's raw bytes untouched. */
+function diskFetchBinaryWithHeaders(requests: string[], headers: Record<string, string>): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const filePath = String(input);
+    requests.push(filePath);
+    try {
+      const buf = await readFile(filePath);
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(headers),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(buf));
+            controller.close();
+          },
+        }),
+        json: async () => JSON.parse(buf.toString("utf8")),
+        text: async () => buf.toString("utf8"),
+      } as unknown as Response;
+    } catch {
+      return { ok: false, status: 404, headers: new Headers(), json: async () => ({}), text: async () => "" } as Response;
+    }
+  }) as typeof fetch;
+}
