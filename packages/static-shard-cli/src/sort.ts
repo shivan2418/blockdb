@@ -1,7 +1,7 @@
 import { closeSync, mkdtempSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-export type SortKind = "number" | "date";
+export type SortKind = "number" | "date" | "string";
 
 /**
  * Compares two sort-field values. Missing values (null/undefined) sort after
@@ -22,7 +22,8 @@ export function compareSortValues(a: unknown, b: unknown, kind: SortKind): numbe
   if (kind === "number") {
     return (a as number) - (b as number);
   }
-  // date values compare as ISO strings
+  // string and date share one branch: dates are ISO strings, so lexicographic order IS chronological
+  // order for them — which is why a string sort field needs no comparison logic of its own.
   const av = a as string;
   const bv = b as string;
   return av < bv ? -1 : av > bv ? 1 : 0;

@@ -26,7 +26,13 @@ const SECONDARY_BOOLEAN_OPERATORS = ["equals"] as const;
 const RIDER_OPERATOR = "not";
 
 function operatorsForField(field: FieldConfig, isSortField: boolean, indexed: boolean): readonly string[] {
-  if (isSortField) return [...SORT_FIELD_OPERATORS, RIDER_OPERATOR];
+  if (isSortField) {
+    // A string sort field gets `startsWith` free on top of the range set: its values are sorted, so
+    // a prefix is a contiguous span of the split-points already in the manifest — no index chunk to
+    // fetch. This is the main reason to sort by a name-like field at all.
+    const ops = [...SORT_FIELD_OPERATORS, ...(field.kind === "string" ? (["startsWith"] as const) : [])];
+    return [...ops, RIDER_OPERATOR];
+  }
   if (!indexed) return [];
   if (field.kind === "string") {
     const ops: string[] = [...SECONDARY_STRING_OPERATORS];

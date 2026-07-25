@@ -12,7 +12,12 @@ export interface SortFieldFilter {
   gte?: SortValue;
   lt?: SortValue;
   lte?: SortValue;
+  /** String sort fields only: a prefix is a contiguous range once values are sorted (ADR-0003 §7). */
+  startsWith?: string;
 }
+
+/** Higher than any realistic code point in a stored value, so `[p, p + this]` brackets every string starting with `p`. */
+const PREFIX_UPPER_SENTINEL = "\u{10FFFF}";
 
 function pointShardIndex(splitPoints: readonly SortValue[], value: SortValue, shardCount: number): number {
   let lo = 0;
@@ -85,13 +90,17 @@ export function candidateShardIndices(
     return [pointShardIndex(splitPoints, filter.equals, shardCount)];
   }
 
-  const hasLower = filter.gt !== undefined || filter.gte !== undefined;
-  const hasUpper = filter.lt !== undefined || filter.lte !== undefined;
+  // `startsWith(p)` IS the closed range [p, p+sentinel] on a sorted string field — free pruning off
+  // the split-points already in the manifest, no index chunk to fetch. Composes with an explicit
+  // range by intersecting: both bounds narrow the same span.
+  const lower = filter.startsWith !== undefined ? filter.startsWith : (filter.gte ?? filter.gt);
+  const upper =
+    filter.startsWith !== undefined ? filter.startsWith + PREFIX_UPPER_SENTINEL : (filter.lte ?? filter.lt);
+  const strictUpper = filter.startsWith === undefined && filter.lt !== undefined;
 
-  const startIdx = hasLower ? pointShardIndex(splitPoints, (filter.gte ?? filter.gt)!, shardCount) : 0;
-  const endIdx = hasUpper
-    ? upperBoundShardIndex(splitPoints, (filter.lte ?? filter.lt)!, shardCount, filter.lt !== undefined)
-    : shardCount - 1;
+  const startIdx = lower !== undefined ? pointShardIndex(splitPoints, lower, shardCount) : 0;
+  const endIdx =
+    upper !== undefined ? upperBoundShardIndex(splitPoints, upper, shardCount, strictUpper) : shardCount - 1;
 
   if (endIdx < startIdx) return [];
   return range(startIdx, endIdx);

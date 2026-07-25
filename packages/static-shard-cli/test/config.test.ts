@@ -47,12 +47,32 @@ describe("resolveConfig", () => {
     expect(() => resolveConfig(bad, "/repo")).toThrow(/sortField/);
   });
 
-  test("rejects a sortField whose kind is not number or date", () => {
-    const bad: StaticShardConfig = {
+  test("accepts a string sortField — it range-partitions lexicographically (ADR-0002 §2)", () => {
+    const stringSorted: StaticShardConfig = {
       ...base,
       schema: { sortField: "title", fields: base.schema.fields },
     };
-    expect(() => resolveConfig(bad, "/repo")).toThrow(/number.*date|date.*number/i);
+    expect(resolveConfig(stringSorted, "/repo").sortField).toBe("title");
+  });
+
+  test("rejects endsWith/contains on the sort field rather than silently dropping them", () => {
+    for (const op of ["endsWith", "contains"] as const) {
+      const bad: StaticShardConfig = {
+        ...base,
+        schema: { sortField: "title", fields: { ...base.schema.fields, title: { kind: "string", [op]: true } } },
+      };
+      expect(() => resolveConfig(bad, "/repo")).toThrow(new RegExp(`${op}[\\s\\S]*split-points|split-points[\\s\\S]*${op}`));
+    }
+  });
+
+  test("rejects a sortField whose kind has no useful order (boolean / json)", () => {
+    for (const kind of ["boolean", "json"] as const) {
+      const bad: StaticShardConfig = {
+        ...base,
+        schema: { sortField: "flag", fields: { ...base.schema.fields, flag: { kind } } },
+      };
+      expect(() => resolveConfig(bad, "/repo")).toThrow(/sortField/);
+    }
   });
 
   test("rejects an unsupported input format", () => {

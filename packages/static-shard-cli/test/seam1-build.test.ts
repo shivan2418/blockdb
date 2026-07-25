@@ -133,6 +133,59 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
     expect(existsSync(clientOutDir)).toBe(true);
   });
 
+  test("a string sort field range-partitions lexicographically and prunes like any other sort field", () => {
+    // ADR-0002 §2 makes the number/date preference a *heuristic for the default*, "never a hidden
+    // decision" — and locality on the field users actually search is the whole point of the choice.
+    const stringSorted: StaticShardConfig = {
+      ...config,
+      shardBytes: 60,
+      schema: {
+        sortField: "title",
+        fields: { year: { kind: "number" }, title: { kind: "string" }, rating: { kind: "number" } },
+      },
+    };
+
+    const { manifest, outputDir } = build(stringSorted, {
+      baseDir: tmpDir,
+      generatorVersion: "0.1.0",
+      formatVersion: 0,
+    });
+
+    expect(manifest.dataset.sortField).toBe("title");
+    // sorting a field implicitly makes it queryable, with the free zonemap operator set (ADR-0002 §2)
+    // — plus startsWith, which a sorted string field gets for free as a split-point range.
+    expect(manifest.schema.fields.title!.indexed).toBe(true);
+    expect(manifest.schema.fields.title!.operators).toEqual([
+      "equals",
+      "in",
+      "gt",
+      "gte",
+      "lt",
+      "lte",
+      "startsWith",
+      "not",
+    ]);
+    // ...and it prunes via split-points, not an inverted index
+    expect(manifest.indexes.title).toBeUndefined();
+
+    const splitPoints = manifest.zonemap.title!.splitPoints as string[];
+    expect(splitPoints).toHaveLength(manifest.shards.length + 1);
+    expect(manifest.shards.length).toBeGreaterThan(1);
+    for (let i = 1; i < splitPoints.length; i++) {
+      expect(splitPoints[i]! >= splitPoints[i - 1]!).toBe(true);
+    }
+
+    // Records are globally ordered by title across shards, and shard ranges don't overlap —
+    // the invariant that makes zonemap pruning exact.
+    const titlesInShardOrder = manifest.shards.flatMap((shard) =>
+      readFileSync(path.join(outputDir, "shards", `${shard.hash}.ndjson`), "utf8")
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => (JSON.parse(l) as { title: string }).title),
+    );
+    expect(titlesInShardOrder).toEqual([...MOVIES.map((m) => m.title)].sort());
+  });
+
   test("manifest.json is written minified — every client downloads it, so indentation is pure wire cost", () => {
     const { manifest, outputDir } = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 

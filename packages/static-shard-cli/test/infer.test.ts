@@ -189,8 +189,27 @@ describe("inferSchema — sort field recommendation", () => {
     expect(["score", "year"]).toContain(inferSchema(records).sortField);
   });
 
-  test("throws a clear, actionable error when no number/date field exists in the sample", () => {
+  test("falls back to a string field when the sample has no number/date candidate", () => {
+    // Previously this threw, which made a string-only dataset unusable outright: --sort-field
+    // couldn't rescue it either, because config validation rejected string sort fields too.
     const records = [{ title: "a" }, { title: "b" }];
+    expect(inferSchema(records).sortField).toBe("title");
+  });
+
+  test("still prefers a number/date field over a higher-cardinality string one", () => {
+    // The guard that keeps `init --yes` stable now that strings are candidates: ranking purely by
+    // cardinality would hand the sort field to a unique identifier column (the worst possible
+    // locality), so kind outranks cardinality.
+    const records = [
+      { uuid: "f47ac10b-58cc", year: 1999 },
+      { uuid: "9c858901-8a57", year: 1999 },
+      { uuid: "7c9e6679-7425", year: 2000 },
+    ];
+    expect(inferSchema(records).sortField).toBe("year");
+  });
+
+  test("throws a clear, actionable error when no sortable field exists at all", () => {
+    const records = [{ ok: true, payload: { a: 1 } }, { ok: false, payload: { a: 2 } }];
     expect(() => inferSchema(records)).toThrow(/sort field|--sort-field/i);
   });
 

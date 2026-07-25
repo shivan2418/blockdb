@@ -31,7 +31,10 @@ describe("buildWizardData", () => {
     );
     // alphabetical ordering
     expect(data.fields.map((f) => f.name)).toEqual(["category", "description", "id", "name", "price"]);
-    expect(data.sortCandidates).toEqual(["price"]); // only always-present, single-valued number/date field
+    // Every always-present, single-valued sortable field is offered — strings included, since
+    // locality on the field users search is the whole point of the choice (ADR-0002 §2)...
+    expect(data.sortCandidates).toEqual(["category", "description", "id", "name", "price"]);
+    // ...but the *recommendation* still prefers number/date, so it can't land on an id-like column.
     expect(data.recommendedSortField).toBe("price");
     expect(data.recommendedPk).toBe("id");
   });
@@ -88,7 +91,7 @@ describe("applyKey — sort field step", () => {
   test("space selects the field under the cursor and clears it from indexed/endsWith/contains", () => {
     const withRank = PRODUCTS.map((p, i) => ({ ...p, rank: i + 1 }));
     const data = buildWizardData(withRank);
-    expect(data.sortCandidates.sort()).toEqual(["price", "rank"]);
+    expect(data.sortCandidates).toContain("rank");
     let state = toStage1(data);
     // pre-seed "rank" into the indexed set to prove picking it as sort field clears it back out
     state = { ...state, indexedFields: new Set([...state.indexedFields, "rank"]) };

@@ -41,6 +41,54 @@ describe("candidateShardIndices", () => {
   test("an empty manifest (no shards) selects nothing", () => {
     expect(candidateShardIndices([], { equals: 2000 })).toEqual([]);
   });
+
+  describe("string split-points (a string sort field range-partitions lexicographically)", () => {
+    // 3 shards: ["Alice","Frank"), ["Frank","Nina"), ["Nina","Zoe"]
+    const names = ["Alice", "Frank", "Nina", "Zoe"];
+
+    test("equals selects exactly the one containing shard, with boundaries falling forward", () => {
+      expect(candidateShardIndices(names, { equals: "Charlie" })).toEqual([0]);
+      expect(candidateShardIndices(names, { equals: "Frank" })).toEqual([1]);
+      expect(candidateShardIndices(names, { equals: "Zoe" })).toEqual([2]);
+    });
+
+    test("values outside the global range select nothing", () => {
+      expect(candidateShardIndices(names, { equals: "Aaron" })).toEqual([]);
+      expect(candidateShardIndices(names, { equals: "Zzz" })).toEqual([]);
+    });
+
+    test("a prefix-style range selects the contiguous covering span", () => {
+      // The startsWith-becomes-a-range trick the sort field gets for free: ["N", "N￿"].
+      // Shard 1 spans ["Frank","Nina") and so may hold "Nadia" — including it is the zonemap
+      // over-approximating, which is always allowed; excluding a real match never is.
+      expect(candidateShardIndices(names, { gte: "N", lte: "N￿" })).toEqual([1, 2]);
+      expect(candidateShardIndices(names, { gte: "Frank", lte: "Paul" })).toEqual([1, 2]);
+      // A prefix at or past a boundary narrows to that shard alone ("Nina" <= "Nina").
+      expect(candidateShardIndices(names, { gte: "Nina", lte: "Nina￿" })).toEqual([2]);
+    });
+
+    test("in selects the union of each value's shard, deduplicated and sorted", () => {
+      expect(candidateShardIndices(names, { in: ["Bob", "Tom"] })).toEqual([0, 2]);
+    });
+
+    test("startsWith prunes for free on a string sort field — sorted values make a prefix a contiguous range", () => {
+      // The reason a string sort field is worth having: no inverted index, no chunk fetch, just the
+      // split-points already in the manifest.
+      expect(candidateShardIndices(names, { startsWith: "Nina" })).toEqual([2]);
+      expect(candidateShardIndices(names, { startsWith: "B" })).toEqual([0]);
+      // Over-approximates across a boundary rather than missing: shard 1 spans ["Frank","Nina") and
+      // could hold "Nadia".
+      expect(candidateShardIndices(names, { startsWith: "N" })).toEqual([1, 2]);
+      // A prefix below every stored value prunes to nothing at all.
+      expect(candidateShardIndices(names, { startsWith: "Aa" })).toEqual([]);
+      // But a prefix that merely happens to be unused still selects the shard whose range brackets
+      // it — split-points bound each shard, they don't enumerate its contents, so "Qqx" could sit in
+      // shard 2's ["Nina","Zoe"] span. Over-approximating is always allowed.
+      expect(candidateShardIndices(names, { startsWith: "Qq" })).toEqual([2]);
+      // An empty prefix constrains nothing.
+      expect(candidateShardIndices(names, { startsWith: "" })).toEqual([0, 1, 2]);
+    });
+  });
 });
 
 describe("pairCandidateShardIndices", () => {

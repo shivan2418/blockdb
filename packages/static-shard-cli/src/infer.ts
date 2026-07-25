@@ -1,3 +1,4 @@
+import { SORTABLE_KINDS, type SortableKind } from "./config.js";
 import type { FieldKind } from "./types.js";
 
 /** ISO-8601 date/date-time, e.g. "1999-03-31" or "2000-05-05T00:00:00Z" (ADR-0001: date = string + isDate). */
@@ -135,23 +136,35 @@ function looksLikePk(name: string, f: InferredField, recordCount: number): boole
   return !f.multi && !f.absent && f.cardinality === recordCount && ID_LIKE_NAME_RE.test(name);
 }
 
-/** A field can be a sort-field candidate iff it's an always-present, single-valued number/date
+/** A field can be a sort-field candidate iff it's an always-present, single-valued sortable kind
  * (ADR-0002 §2) — exported so the wizard's sort-field step (T12) shares this exact predicate
  * instead of a second copy that could silently drift from what `init --yes` would recommend. */
 export function isSortFieldCandidate(f: Pick<InferredField, "kind" | "multi" | "absent">): boolean {
-  return (f.kind === "number" || f.kind === "date") && !f.multi && !f.absent;
+  return SORTABLE_KINDS.includes(f.kind as SortableKind) && !f.multi && !f.absent;
+}
+
+/**
+ * Ranks a candidate's *kind* ahead of its cardinality. Strings are legal sort fields (locality on
+ * the field users search is the point — ADR-0002 §2), but ranking purely by cardinality would hand
+ * the default to whichever column is most unique, which on real data is an id/UUID/URL — the worst
+ * possible locality. So number/date keep the default and a string only wins when nothing else can.
+ */
+function sortKindRank(kind: FieldKind): number {
+  return kind === "string" ? 1 : 0;
 }
 
 function recommendSortField(fields: Record<string, InferredField>, recordCount: number): string {
   const candidates = Object.entries(fields).filter(([, f]) => isSortFieldCandidate(f));
   if (candidates.length === 0) {
     throw new Error(
-      "static-shard: init could not infer a sort field — no always-present, single-valued number/date field " +
-        "was found in the sample; declare one explicitly with --sort-field",
+      "static-shard: init could not infer a sort field — no always-present, single-valued " +
+        `${SORTABLE_KINDS.join("/")} field was found in the sample; declare one explicitly with --sort-field`,
     );
   }
 
   candidates.sort(([nameA, a], [nameB, b]) => {
+    const kindRank = sortKindRank(a.kind) - sortKindRank(b.kind);
+    if (kindRank !== 0) return kindRank;
     if (b.cardinality !== a.cardinality) return b.cardinality - a.cardinality;
     // ADR-0002 §2: tiebreak toward the PK — judged directly off each candidate's own
     // uniqueness + id-like name, not by deferring to recommendPk (which runs after the

@@ -71,7 +71,7 @@
       "properties": {
         "sortField": {
           "type": "string",
-          "description": "Must name a \"number\" or \"date\" field — the sole range-partitioned field."
+          "description": "Must name a \"number\", \"date\" or \"string\" field — the sole range-partitioned field. This choice decides which records are stored next to each other, so it is the single biggest lever on query cost: filters on this field read a few data files, filters on anything else may read most of them."
         },
         "pk": {
           "type": "string",

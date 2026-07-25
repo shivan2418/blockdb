@@ -8,6 +8,13 @@ const DEFAULT_SHARD_BYTES = 2_097_152; // 2 MiB
 /** ~45 KB gzipped anchor (ADR-0003 §5) — exported so the wizard's live estimates (T12) use the same default `build` would. */
 export const DEFAULT_INDEX_CHUNK_BYTES = 45_000;
 const INPUT_FORMATS = ["ndjson", "json", "csv", "tsv"] as const;
+/**
+ * Field kinds a sort field may have (ADR-0002 §2). Exported so `infer`'s candidate predicate and
+ * the wizard's candidate list share this exact set rather than keeping second copies that could
+ * drift from what `build` accepts.
+ */
+export const SORTABLE_KINDS = ["number", "date", "string"] as const;
+export type SortableKind = (typeof SORTABLE_KINDS)[number];
 const DEFAULT_DELIMITERS: Partial<Record<InputFormat, string>> = { csv: ",", tsv: "\t" };
 
 function defaultBasePath(output: string): string {
@@ -35,10 +42,29 @@ export function resolveConfig(config: StaticShardConfig, baseDir: string): Resol
   if (!sortFieldConfig) {
     throw new Error(`static-shard: config.schema.sortField "${sortField}" is not declared in config.schema.fields`);
   }
-  if (sortFieldConfig.kind !== "number" && sortFieldConfig.kind !== "date") {
+  // number | date | string. Strings range-partition lexicographically exactly as dates already do
+  // (dates ARE compared as ISO strings), and the sort field is the one field whose locality decides
+  // what a query costs — restricting it to number/date would have forced a timestamp on datasets
+  // whose real access pattern is a name. `boolean` and `json` stay out: a two-value sort field is a
+  // degenerate partition, and a payload field has no order (ADR-0001).
+  if (!SORTABLE_KINDS.includes(sortFieldConfig.kind as SortableKind)) {
     throw new Error(
-      `static-shard: sortField "${sortField}" must be "number" or "date", got "${sortFieldConfig.kind}"`,
+      `static-shard: sortField "${sortField}" must be one of ${SORTABLE_KINDS.join(" / ")}, got "${sortFieldConfig.kind}"`,
     );
+  }
+
+  // `endsWith`/`contains` build structures only for non-sort fields (build.ts indexes the secondary
+  // set), so declaring them on the sort field used to be silently dropped — the config asked for an
+  // operator the generated client would never expose. Say so instead.
+  for (const op of ["endsWith", "contains"] as const) {
+    if (sortFieldConfig[op]) {
+      throw new Error(
+        `static-shard: sortField "${sortField}" cannot also declare ${op}: true — the sort field prunes via ` +
+          `split-points, not an inverted index, so no ${op} structure is built for it. ` +
+          `Sorted string fields get equals/in/startsWith and the range operators for free; for ${op} on ` +
+          `"${sortField}", sort by a different field and index this one instead.`,
+      );
+    }
   }
 
   for (const [name, field] of Object.entries(config.schema.fields)) {
