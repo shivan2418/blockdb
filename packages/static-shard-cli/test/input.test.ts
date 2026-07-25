@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { expandInputFiles, readInputRecords } from "../src/input.js";
+import { countInputRecords, expandInputFiles, readInputRecords } from "../src/input.js";
 
 let tmpDir: string;
 
@@ -267,5 +267,30 @@ describe("readInputRecords — glob merges same-format files as one dataset", ()
     expect(() =>
       readInputRecords(path.join(tmpDir, "*.ndjson"), { format: "ndjson", delimiter: ",", fields: FIELDS }),
     ).toThrow(/no input files matched/i);
+  });
+});
+
+describe("countInputRecords", () => {
+  test("counts every NDJSON record and its payload bytes, ignoring blank lines", () => {
+    const line1 = JSON.stringify({ year: 1999, title: "The Matrix" });
+    const line2 = JSON.stringify({ year: 2000, title: "Gladiator" });
+    writeFileSync(path.join(tmpDir, "movies.ndjson"), `${line1}\n\n${line2}\n`);
+    const stats = countInputRecords(path.join(tmpDir, "movies.ndjson"), { format: "ndjson", delimiter: ",", fields: FIELDS });
+    expect(stats.recordCount).toBe(2);
+    expect(stats.datasetBytes).toBe(Buffer.byteLength(line1, "utf8") + Buffer.byteLength(line2, "utf8"));
+  });
+
+  test("counts the FULL dataset even though inference reads only a sample (limit)", () => {
+    const lines = Array.from({ length: 5000 }, (_, i) => JSON.stringify({ year: 2000 + i, title: `M${i}` }));
+    writeFileSync(path.join(tmpDir, "big.ndjson"), lines.join("\n") + "\n");
+    const opts = { format: "ndjson" as const, delimiter: ",", fields: FIELDS };
+    expect(readInputRecords(path.join(tmpDir, "big.ndjson"), { ...opts, limit: 1000 })).toHaveLength(1000);
+    expect(countInputRecords(path.join(tmpDir, "big.ndjson"), opts).recordCount).toBe(5000);
+  });
+
+  test("sums record counts across a glob of NDJSON files", () => {
+    writeFileSync(path.join(tmpDir, "a.ndjson"), `${JSON.stringify({ year: 1 })}\n${JSON.stringify({ year: 2 })}\n`);
+    writeFileSync(path.join(tmpDir, "b.ndjson"), `${JSON.stringify({ year: 3 })}\n`);
+    expect(countInputRecords(path.join(tmpDir, "*.ndjson"), { format: "ndjson", delimiter: ",", fields: FIELDS }).recordCount).toBe(3);
   });
 });

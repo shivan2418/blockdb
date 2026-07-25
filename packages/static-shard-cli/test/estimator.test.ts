@@ -254,3 +254,31 @@ describe("estimateCosts", () => {
     expect(result.perQuery.equality).toBeUndefined();
   });
 });
+
+describe("profileDataset — sampled population override", () => {
+  const sample = [
+    { year: 1999, title: "The Matrix" },
+    { year: 2000, title: "Gladiator" },
+  ];
+
+  test("takes recordCount and datasetBytes from the population, not the sample, when provided", () => {
+    const profile = profileDataset(sample, { sortField: "year", fields: {} }, { recordCount: 500_000, datasetBytes: 250_000_000 });
+    expect(profile.recordCount).toBe(500_000);
+    expect(profile.datasetBytes).toBe(250_000_000);
+  });
+
+  test("without a population, the sample is its own population (full-scan / inspect)", () => {
+    const profile = profileDataset(sample, { sortField: "year", fields: {} });
+    expect(profile.recordCount).toBe(2);
+  });
+
+  test("a large population drives shardCount up even from a tiny sample", () => {
+    const sampled = profileDataset(sample, { sortField: "year", fields: {} }, { recordCount: 500_000, datasetBytes: 250_000_000 });
+    const costs = estimateCosts(sampled, [{ name: "year", kind: "number", indexed: true, absent: false, multi: false }], {
+      shardBytes: 2_097_152,
+      indexChunkBytes: 46_080,
+    });
+    expect(costs.shardCount).toBe(estimateShardCount(250_000_000, 2_097_152));
+    expect(costs.shardCount).toBeGreaterThan(1);
+  });
+});

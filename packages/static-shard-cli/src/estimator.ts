@@ -85,9 +85,17 @@ export interface DatasetProfile {
 export function profileDataset(
   records: Record<string, unknown>[],
   config: { sortField: string; fields: Record<string, FieldConfig> },
+  /**
+   * True population totals when `records` is only a sample (the wizard's default): `recordCount` and
+   * `datasetBytes` are taken from these so shard-count and size estimates reflect the whole dataset,
+   * while per-field cardinality/value stats stay sample-derived (a sampled estimate, ADR-0006 §3).
+   * Omit when `records` IS the full dataset (`--full-scan`, `inspect`) — sample then equals population.
+   */
+  population?: { recordCount: number; datasetBytes: number },
 ): DatasetProfile {
   const recordBytes = records.map((r) => jsonByteLength(r)).sort((a, b) => a - b);
-  const datasetBytes = recordBytes.reduce((sum, b) => sum + b, 0);
+  const sampleBytes = recordBytes.reduce((sum, b) => sum + b, 0);
+  const datasetBytes = population?.datasetBytes ?? sampleBytes;
   const p95RecordBytes = percentile(recordBytes, 0.95);
   const maxRecordBytes = recordBytes.length > 0 ? recordBytes[recordBytes.length - 1]! : 0;
 
@@ -105,7 +113,7 @@ export function profileDataset(
   }
 
   return {
-    recordCount: records.length,
+    recordCount: population?.recordCount ?? records.length,
     datasetBytes,
     p95RecordBytes,
     maxRecordBytes,
