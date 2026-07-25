@@ -18,7 +18,7 @@ export const schema = {
     fields: {
       title: { kind: "string", operators: ["equals", "in", "startsWith", "contains", "not"] },
       year: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"] },
-      rating: { kind: "number", operators: ["equals", "in", "not"] },
+      rating: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"] },
       director: { kind: "string", operators: ["equals", "in", "startsWith", "not"] },
       genres: { kind: "string", operators: ["equals", "in", "startsWith", "not"], multi: true },
     },
