@@ -9,6 +9,7 @@ import {
   createInitialState,
   deriveWizardChoices,
   estimateForState,
+  STAGE_LABELS,
   renderFrame,
   type WizardState,
 } from "../src/wizard.js";
@@ -84,8 +85,10 @@ describe("applyKey — stage navigation", () => {
 });
 
 describe("applyKey — sort field step", () => {
+  // Sort field is stage 2 now — the filter step is asked first, so the recommendation can react to it.
   function toStage1(data: ReturnType<typeof buildWizardData>) {
-    return applyKey(data, createInitialState(data), { type: "right" });
+    let state = applyKey(data, createInitialState(data), { type: "right" });
+    return applyKey(data, state, { type: "right" });
   }
 
   test("space selects the field under the cursor and clears it from indexed/endsWith/contains", () => {
@@ -118,10 +121,7 @@ describe("applyKey — sort field step", () => {
 
 describe("applyKey — filter fields step", () => {
   function toStage2(data: ReturnType<typeof buildWizardData>) {
-    let state = createInitialState(data);
-    state = applyKey(data, state, { type: "right" });
-    state = applyKey(data, state, { type: "right" });
-    return state;
+    return applyKey(data, createInitialState(data), { type: "right" });
   }
 
   test("space toggles a field's indexed membership and clears endsWith/contains when turned off", () => {
@@ -139,14 +139,15 @@ describe("applyKey — filter fields step", () => {
     expect(state.containsFields.has("category")).toBe(false);
   });
 
-  test("the sort field itself never appears in the filterable list", () => {
+  test("every non-payload field is offered, the sort field included — it hasn't been chosen yet", () => {
     const data = buildWizardData(PRODUCTS);
     const state = toStage2(data);
-    // walking every candidate and toggling must never be able to select the sort field
+    const selectable = new Set<string>();
     for (let i = 0; i < 20; i++) {
       const s = applyKey(data, { ...state, cursor: i }, { type: "space" });
-      expect(s.indexedFields.has(state.sortField)).toBe(false);
+      for (const name of s.indexedFields) selectable.add(name);
     }
+    expect([...selectable].sort()).toEqual(["category", "description", "id", "name", "price"]);
   });
 
   test("select-all indexes every currently-visible candidate, leaving already-indexed fields' endsWith/contains untouched", () => {
@@ -187,8 +188,9 @@ describe("applyKey — filter fields step", () => {
   });
 
   test("the list fills the reported terminal height instead of a fixed page size", () => {
+    // Comfortably more candidates than even a tall terminal can show, so "windowed" is testable.
     const wideRecord: Record<string, unknown> = { price: 1 };
-    for (let i = 0; i < 40; i++) wideRecord[`field${i}`] = i;
+    for (let i = 0; i < 80; i++) wideRecord[`field${i}`] = i;
     const data = buildWizardData([wideRecord, { ...wideRecord, price: 2 }, { ...wideRecord, price: 3 }]);
     const state = toStage2(data);
     const estimate = estimateForState(data, state);
@@ -202,7 +204,7 @@ describe("applyKey — filter fields step", () => {
     const tallScreen = checklistRowCount(60);
     expect(tallScreen).toBeGreaterThan(shortScreen);
     expect(shortScreen).toBeGreaterThanOrEqual(3); // never below the MIN_VISIBLE_ROWS floor
-    expect(tallScreen).toBeLessThan(41); // still windowed, not the whole 41-candidate list at once
+    expect(tallScreen).toBeLessThan(81); // still windowed, not the whole 81-candidate list at once
 
     // omitting terminalRows falls back to DEFAULT_TERMINAL_ROWS (24) rather than an unbounded list.
     const rendered = renderFrame(data, state, estimate);
@@ -407,8 +409,8 @@ describe("flag-equivalence (ADR-0006 §1 / T12 acceptance)", () => {
       let state = createInitialState(data);
       // drive a handful of real interactions: change the indexed set, opt a field into contains,
       // and shrink the shard size — then land on review and persist.
-      state = applyKey(data, state, { type: "right" }); // -> stage 1 (sort field), keep the recommendation
-      state = applyKey(data, state, { type: "right" }); // -> stage 2 (filter fields)
+      state = applyKey(data, state, { type: "right" }); // -> stage 1 (filter fields)
+      state = applyKey(data, state, { type: "right" }); // -> stage 2 (sort field), keep the recommendation
       const nameIdx = data.fields.filter((f) => f.name !== state.sortField).findIndex((f) => f.name === "name");
       for (let i = 0; i < nameIdx; i++) state = applyKey(data, state, { type: "down" });
       state = applyKey(data, state, { type: "space" }); // index "name"
@@ -456,5 +458,124 @@ describe("flag-equivalence (ADR-0006 §1 / T12 acceptance)", () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("stage order — what you filter on is asked BEFORE the sort field", () => {
+  const FILTER_STAGE = 1;
+  const SORT_STAGE = 2;
+
+  function atStage(data: ReturnType<typeof buildWizardData>, stage: number) {
+    let state = createInitialState(data);
+    for (let i = 0; i < stage; i++) state = applyKey(data, state, { type: "right" });
+    return state;
+  }
+
+  test("STAGE_LABELS puts Filter fields before Sort field", () => {
+    expect(STAGE_LABELS[FILTER_STAGE]).toBe("Filter fields");
+    expect(STAGE_LABELS[SORT_STAGE]).toBe("Sort field");
+  });
+
+  test("the filter step offers every non-payload field, including sort-field candidates", () => {
+    // Nothing is excluded for being "the sort field" yet — the user hasn't been asked.
+    const data = buildWizardData(PRODUCTS);
+    const rendered = renderFrame(data, atStage(data, FILTER_STAGE), estimateForState(data, atStage(data, FILTER_STAGE)));
+    for (const field of ["category", "description", "id", "name", "price"]) {
+      expect(rendered).toContain(field);
+    }
+  });
+
+  /**
+   * The field report's shape in miniature, and big enough for locality to be measurable: `region`
+   * runs in contiguous blocks of `rank`, while `scanned_at` is a bulk-rescan timestamp uncorrelated
+   * with everything. 5 records and 2 bins is pure noise — the metric needs repeated values.
+   */
+  const REGIONS = ["north", "south", "east", "west", "central", "coastal", "inland", "border"];
+  const CATALOG = Array.from({ length: 200 }, (_, i) => {
+    let x = Math.imul(i + 1, 2654435761) >>> 0;
+    x ^= x >>> 15;
+    return {
+      sku: `sku-${String(i).padStart(4, "0")}`,
+      rank: i,
+      region: REGIONS[Math.floor(i / 25)]!,
+      scanned_at: new Date(Date.UTC(2026, 0, 1 + (x % 900))).toISOString(),
+    };
+  });
+
+  test("recommends the sort field that measurably clusters what the user filters on", () => {
+    // Nothing here keys off field NAMES: `rank` wins because sorting by it puts each region's
+    // records together, and `scanned_at` loses because it scatters them across every file.
+    const data = buildWizardData(CATALOG);
+    expect(data.sortCandidates).toEqual(expect.arrayContaining(["rank", "scanned_at"]));
+
+    let state = atStage(data, FILTER_STAGE);
+    state = { ...state, indexedFields: new Set(["region"]) };
+    state = applyKey(data, state, { type: "right" });
+
+    expect(state.stage).toBe(SORT_STAGE);
+    expect(state.sortField).toBe("rank");
+
+    // and the measurement backs it: sorting by the timestamp reads far more of the data
+    const est = estimateForState(data, state);
+    expect(est.locality.rank!.scatter).toBeLessThan(est.locality.scanned_at!.scatter);
+  });
+
+  test("prefers a field the user filters on over one they don't, because it clusters itself perfectly", () => {
+    const data = buildWizardData(CATALOG);
+    let state = atStage(data, FILTER_STAGE);
+    // `region` is itself a sort candidate; filtering on it makes sorting by it the cheapest choice
+    state = { ...state, indexedFields: new Set(["region"]) };
+    state = applyKey(data, state, { type: "right" });
+    const est = estimateForState(data, state);
+    expect(est.locality.region!.scatter).toBeLessThanOrEqual(est.locality.rank!.scatter);
+  });
+
+  test("a fully-unique field carries no locality signal and cannot skew the ranking", () => {
+    // Every `sku` occurs once, so it sits in one bin under any ordering — measuring against it would
+    // report every candidate as equally good.
+    const data = buildWizardData(CATALOG);
+    let state = atStage(data, FILTER_STAGE);
+    state = { ...state, indexedFields: new Set(["sku"]) };
+    state = applyKey(data, state, { type: "right" });
+    // no measurable signal -> falls back to the same recommendation `init --yes` would make
+    expect(estimateForState(data, state).locality).toEqual({});
+    expect(state.sortField).toBe(data.recommendedSortField);
+  });
+
+  test("deriveWizardChoices never lists the sort field as a filter field, whatever the click order", () => {
+    // Reachable by checking a field at the filter step, then choosing it as sort field, then going
+    // back and re-checking it — the config would otherwise carry a redundant indexed: true.
+    const data = buildWizardData(PRODUCTS);
+    const state = { ...createInitialState(data), sortField: "price", indexedFields: new Set(["price", "name"]) };
+    expect(deriveWizardChoices(state).indexedFields).toEqual(["name"]);
+  });
+
+  test("warns, with measured numbers, when the sort field scatters what you filter on", () => {
+    const data = buildWizardData(CATALOG);
+    const scattered = {
+      ...createInitialState(data),
+      sortField: "scanned_at",
+      indexedFields: new Set(["region"]),
+      shardBytes: 4096,
+    };
+    const warning = estimateForState(data, scattered).warnings.join("\n");
+    expect(warning).toMatch(/scanned_at/);
+    expect(warning).toMatch(/scatters/i);
+    expect(warning).toMatch(/\d+% of your data files/);
+    // and it names the better alternative it measured
+    expect(warning).toMatch(/"rank"|"region"/);
+
+    const clustered = { ...scattered, sortField: "region" };
+    expect(estimateForState(data, clustered).warnings.join("\n")).not.toMatch(/scatters/i);
+  });
+
+  test("a low-cardinality candidate loses to one that shards evenly, however well it clusters", () => {
+    // `region` clusters perfectly but has 8 values across 200 records, so equal-key runs stay
+    // contiguous and it shards badly (ADR-0002 §6). Locality alone would pick it.
+    const data = buildWizardData(CATALOG);
+    let state = atStage(data, FILTER_STAGE);
+    state = { ...state, indexedFields: new Set(["region", "rank"]) };
+    state = applyKey(data, state, { type: "right" });
+    expect(state.sortField).toBe("rank");
   });
 });

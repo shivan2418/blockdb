@@ -11,6 +11,8 @@ import {
 } from "./estimator.js";
 import { DEFAULT_INDEX_CHUNK_BYTES } from "./config.js";
 import { inferSchema, isSortFieldCandidate } from "./infer.js";
+import { compareSortValues, type SortKind } from "./sort.js";
+import { valuesOf } from "./secondary-index.js";
 import type { PopulationStats } from "./input.js";
 import { lowCardinalitySortFieldWarning, oversizedRecordWarning } from "./warnings.js";
 import type { FieldConfig, FieldKind } from "./types.js";
@@ -21,8 +23,16 @@ import type { FieldConfig, FieldKind } from "./types.js";
  */
 export const CHUNK_STEPS = [65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152, 4_194_304, 8_388_608];
 
-export const STAGE_LABELS = ["Detect", "Sort field", "Filter fields", "Text search", "File size", "Review"] as const;
+/**
+ * Filter fields comes BEFORE Sort field deliberately (ADR-0002 §2). The sort field decides which
+ * records are stored next to each other, so the only way to choose it well is to know what the user
+ * filters on — asking for it first meant recommending locality before knowing what locality was for,
+ * which is how a bulk-maintenance timestamp wins.
+ */
+export const STAGE_LABELS = ["Detect", "Filter fields", "Sort field", "Text search", "File size", "Review"] as const;
 export const LAST_STAGE = STAGE_LABELS.length - 1;
+const FILTER_STAGE = 1;
+const SORT_STAGE = 2;
 
 function nearestChunkStep(bytes: number): number {
   return CHUNK_STEPS.reduce((best, step) => (Math.abs(step - bytes) < Math.abs(best - bytes) ? step : best), CHUNK_STEPS[0]!);
@@ -99,6 +109,12 @@ export interface WizardState {
   endsWithFields: Set<string>;
   containsFields: Set<string>;
   shardBytes: number;
+  /**
+   * True once the user has chosen a sort field themselves. Until then, arriving at the sort step
+   * re-seeds `sortField` from the measured recommendation, which only becomes meaningful after the
+   * filter step — an explicit pick must never be silently overwritten by that.
+   */
+  sortFieldPicked: boolean;
   /** Type-to-filter query (ADR-0006 §5) — shared by the filter-fields and text-search steps, reset on stage change. */
   filterQuery: string;
   reviewJsonExpanded: boolean;
@@ -116,6 +132,7 @@ export function createInitialState(data: WizardData): WizardState {
     endsWithFields: new Set(),
     containsFields: new Set(),
     shardBytes: nearestChunkStep(recommendShardBytes(baseline.p95RecordBytes)),
+    sortFieldPicked: false,
     filterQuery: "",
     reviewJsonExpanded: false,
     persisted: false,
@@ -149,14 +166,18 @@ function sortCandidateFields(data: WizardData, state: WizardState): WizardField[
 }
 
 /**
- * Filter-fields step's candidate list: every field except the current sort field (ADR-0006 §2) and
- * except payload-only `json` fields — those hold nested/mixed values that can't be indexed at all,
- * so offering them would only let the user pick a choice the config validator then rejects.
+ * Filter-fields step's candidate list: every field except payload-only `json` fields — those hold
+ * nested/mixed values that can't be indexed at all, so offering them would only let the user pick a
+ * choice the config validator then rejects.
+ *
+ * The sort field is NOT excluded: this step now runs before the sort field is chosen, so there is
+ * nothing meaningful to exclude, and hiding whichever field happened to be pre-seeded would drop it
+ * from the list for no reason the user can see. Choosing it as the sort field later clears it from
+ * this set (`clearFieldFromOptionalSets`), and `deriveWizardChoices` enforces that regardless of the
+ * order the user visits steps in.
  */
 function filterableFields(data: WizardData, state: WizardState): WizardField[] {
-  return data.fields.filter(
-    (f) => f.name !== state.sortField && f.kind !== "json" && matchesQuery(f.name, state.filterQuery),
-  );
+  return data.fields.filter((f) => f.kind !== "json" && matchesQuery(f.name, state.filterQuery));
 }
 
 export interface TextSearchRow {
@@ -179,14 +200,151 @@ function textSearchRows(data: WizardData, state: WizardState): TextSearchRow[] {
   return rows.filter((r) => matchesQuery(r.field, state.filterQuery));
 }
 
+/**
+ * How many of the user's filter fields to measure locality against. The score is an average, so a
+ * bounded sample estimates it closely, and this keeps the work flat when someone indexes 90 fields
+ * (the metric is recomputed on every keypress). Deterministic — the candidate list is alphabetical.
+ */
+const LOCALITY_PROBE_FIELDS = 8;
+/**
+ * Above this measured share of data files per query, the sort field isn't buying locality for what
+ * the user actually filters on — the exact situation that makes an otherwise well-configured build
+ * read most of its own data on every query.
+ */
+const SCATTERED_SORT_FIELD_RATIO = 0.5;
+/** Cap on bins used to model shards; beyond this the extra resolution changes no ranking decision. */
+const LOCALITY_MAX_BINS = 64;
+
+/**
+ * Fraction of data files a query on `field` would read, if records were range-partitioned by
+ * `sortField`. Measured directly on the sampled records rather than guessed from field names: order
+ * the sample by `sortField`, cut it into `bins` shard-sized groups, then average — over `field`'s
+ * distinct values — how many groups each value lands in. `1/bins` means perfect clustering (every
+ * value in one file); `1.0` means a value is in every file, so the query reads everything.
+ *
+ * This is the same quantity a real build produces, at sample resolution: it is why sorting Scryfall
+ * by `image_updated_at` scatters every card query across every shard, and it needs no heuristic
+ * about what a field is *called*.
+ */
+function scatterOf(
+  records: Record<string, unknown>[],
+  sortField: string,
+  sortKind: SortKind,
+  field: string,
+  multi: boolean,
+  bins: number,
+): number | undefined {
+  const ordered = [...records].sort((a, b) => compareSortValues(a[sortField], b[sortField], sortKind));
+  const stats = new Map<string, { bins: Set<number>; count: number }>();
+  ordered.forEach((record, i) => {
+    const bin = Math.floor((i * bins) / ordered.length);
+    for (const value of valuesOf(record, field, multi)) {
+      if (value === null || value === undefined) continue;
+      const key = typeof value === "string" ? value : JSON.stringify(value);
+      let entry = stats.get(key);
+      if (!entry) {
+        entry = { bins: new Set(), count: 0 };
+        stats.set(key, entry);
+      }
+      entry.bins.add(bin);
+      entry.count++;
+    }
+  });
+  if (stats.size === 0) return undefined;
+
+  // A value occurring once sits in exactly one bin whatever the ordering, so a field whose values
+  // never repeat cannot distinguish one sort field from another. It carries no signal and must not
+  // dilute the average — identifier, UUID and URL columns are exactly this shape.
+  let occurrences = 0;
+  for (const { count } of stats.values()) occurrences += count;
+  if (occurrences === stats.size) return undefined;
+
+  // Occurrence-weighted, not a plain mean over distinct values: a query is far more likely to name a
+  // common value than a rare one, and common values are the expensive ones. Averaging unweighted lets
+  // a long tail of near-unique values (one artist with one card) hide how badly the frequent ones
+  // scatter.
+  let weighted = 0;
+  for (const { bins: seen, count } of stats.values()) weighted += count * seen.size;
+  return weighted / occurrences / bins;
+}
+
+/**
+ * Per sort-field candidate, the average fraction of data files a query on the user's chosen filter
+ * fields would read. Lower is better. A candidate the user also filters on scores near-perfectly on
+ * its own contribution, so "prefer a field you query" falls out of the measurement instead of being
+ * a special case bolted on top.
+ */
+export function sortFieldLocality(
+  data: WizardData,
+  state: WizardState,
+  shardCount: number,
+): Record<string, { scatter: number; field: string }> {
+  const bins = Math.max(2, Math.min(LOCALITY_MAX_BINS, shardCount, data.records.length));
+  const byName = new Map(data.fields.map((f) => [f.name, f]));
+  const probes = [...state.indexedFields]
+    .sort()
+    .slice(0, LOCALITY_PROBE_FIELDS)
+    .map((name) => byName.get(name))
+    .filter((f): f is WizardField => f !== undefined);
+  if (probes.length === 0) return {};
+
+  const out: Record<string, { scatter: number; field: string }> = {};
+  for (const candidate of data.sortCandidates) {
+    const kind = byName.get(candidate)!.kind as SortKind;
+    // The BEST filter field, not the average across all of them. Only one dimension can be clustered,
+    // so averaging buries the improvement under the fields that scatter regardless — on real data it
+    // scored a well-chosen sort field identically to a useless one. The decision this informs is
+    // "which of my filters do I want to be cheap", so the ranking is over exactly that.
+    let best: { scatter: number; field: string } | undefined;
+    for (const probe of probes) {
+      const scatter = scatterOf(data.records, candidate, kind, probe.name, probe.multi, bins);
+      if (scatter !== undefined && (best === undefined || scatter < best.scatter)) {
+        best = { scatter, field: probe.name };
+      }
+    }
+    if (best !== undefined) out[candidate] = best;
+  }
+  return out;
+}
+
+/**
+ * The sort field to recommend once the user has said what they filter on. Ranked by measured
+ * locality, with one guard ahead of it: a candidate whose value runs are long enough to trip
+ * `lowCardinalitySortFieldWarning` shards badly however well it clusters (equal-key runs stay
+ * contiguous, ADR-0002 §6), so it loses to any candidate that doesn't. Falls back to the
+ * kind-and-cardinality recommendation `init --yes` uses when nothing has been selected to measure
+ * against.
+ */
+export function recommendedSortFieldFor(data: WizardData, state: WizardState, shardCount: number): string {
+  const locality = sortFieldLocality(data, state, shardCount);
+  const scored = data.sortCandidates.filter((name) => locality[name] !== undefined);
+  if (scored.length === 0) return data.recommendedSortField;
+
+  const byName = new Map(data.fields.map((f) => [f.name, f]));
+  const skews = (name: string): boolean =>
+    lowCardinalitySortFieldWarning(data.records.length, byName.get(name)!.cardinality) !== undefined;
+
+  return scored.sort((a, b) => {
+    if (skews(a) !== skews(b)) return skews(a) ? 1 : -1;
+    if (locality[a]!.scatter !== locality[b]!.scatter) return locality[a]!.scatter - locality[b]!.scatter;
+    const cardDiff = byName.get(b)!.cardinality - byName.get(a)!.cardinality;
+    return cardDiff !== 0 ? cardDiff : a < b ? -1 : 1;
+  })[0]!;
+}
+
 function clampCursor(cursor: number, length: number): number {
   if (length === 0) return 0;
   return ((cursor % length) + length) % length;
 }
 
-function enterStage(state: WizardState, stage: number): WizardState {
+function enterStage(data: WizardData, state: WizardState, stage: number): WizardState {
   const next: WizardState = { ...state, stage, cursor: 0, filterQuery: "" };
   if (stage === 4) next.cursor = CHUNK_STEPS.indexOf(nearestChunkStep(state.shardBytes));
+  // The measured recommendation only means anything once the filter step has been answered, so it is
+  // applied on arrival at the sort step rather than up front — but never over an explicit pick.
+  if (stage === SORT_STAGE && !state.sortFieldPicked) {
+    next.sortField = recommendedSortFieldFor(data, state, estimateShardCount(data.population.datasetBytes, state.shardBytes));
+  }
   return next;
 }
 
@@ -207,27 +365,29 @@ function clearFieldFromOptionalSets(state: WizardState, name: string): Pick<Wiza
  */
 export function applyKey(data: WizardData, state: WizardState, key: WizardKey): WizardState {
   if (key.type === "cancel") return { ...state, quit: true };
-  if (key.type === "left") return state.stage > 0 ? enterStage(state, state.stage - 1) : state;
-  if (key.type === "right") return state.stage < LAST_STAGE ? enterStage(state, state.stage + 1) : state;
+  if (key.type === "left") return state.stage > 0 ? enterStage(data, state, state.stage - 1) : state;
+  if (key.type === "right") return state.stage < LAST_STAGE ? enterStage(data, state, state.stage + 1) : state;
 
   if (state.stage === 0) {
-    return key.type === "enter" ? enterStage(state, 1) : state;
+    return key.type === "enter" ? enterStage(data, state, FILTER_STAGE) : state;
   }
 
-  if (state.stage === 1) {
+  if (state.stage === SORT_STAGE) {
     const candidates = sortCandidateFields(data, state);
     if (key.type === "up") return { ...state, cursor: clampCursor(state.cursor - 1, candidates.length) };
     if (key.type === "down") return { ...state, cursor: clampCursor(state.cursor + 1, candidates.length) };
     if (key.type === "space") {
       const picked = candidates[state.cursor];
-      return picked ? { ...state, sortField: picked.name, ...clearFieldFromOptionalSets(state, picked.name) } : state;
+      return picked
+        ? { ...state, sortField: picked.name, sortFieldPicked: true, ...clearFieldFromOptionalSets(state, picked.name) }
+        : state;
     }
     if (key.type === "char") return { ...state, filterQuery: state.filterQuery + key.value, cursor: 0 };
     if (key.type === "backspace") return { ...state, filterQuery: state.filterQuery.slice(0, -1), cursor: 0 };
     return state;
   }
 
-  if (state.stage === 2) {
+  if (state.stage === FILTER_STAGE) {
     const candidates = filterableFields(data, state);
     if (key.type === "up") return { ...state, cursor: clampCursor(state.cursor - 1, candidates.length) };
     if (key.type === "down") return { ...state, cursor: clampCursor(state.cursor + 1, candidates.length) };
@@ -328,7 +488,11 @@ export interface WizardChoices {
 export function deriveWizardChoices(state: WizardState): WizardChoices {
   return {
     sortField: state.sortField,
-    indexedFields: [...state.indexedFields],
+    // The sort field is queryable by virtue of being sorted (ADR-0002 §2), so it never needs to
+    // appear in the explicit indexed set. Enforced here rather than only at pick time, so no
+    // navigation order (check it at the filter step, then choose it as sort field, then go back and
+    // re-check it) can leak a redundant `indexed: true` into the written config.
+    indexedFields: [...state.indexedFields].filter((name) => name !== state.sortField),
     endsWithFields: [...state.endsWithFields],
     containsFields: [...state.containsFields],
     shardBytes: state.shardBytes,
@@ -347,6 +511,11 @@ function forcedIndexedFieldConfigs(data: WizardData, sortField: string): Record<
 export interface WizardEstimate {
   costs: CostEstimate;
   warnings: string[];
+  /**
+   * Per sort-field candidate: the measured fraction of data files the user's best-clustered filter
+   * would read under that choice, and which filter field that is.
+   */
+  locality: Record<string, { scatter: number; field: string }>;
   masterProfile: DatasetProfile;
   /** What enabling `endsWith`/`contains` on a field WOULD cost, independent of whether it's toggled on yet — the text-search step's live preview (ADR-0006 §2/§3). */
   probeIndex(name: string, opts: { endsWith?: boolean; contains?: boolean }): IndexSizeEstimate;
@@ -397,6 +566,20 @@ export function estimateForState(data: WizardData, state: WizardState): WizardEs
   if (lowCard) warnings.push(lowCard);
   const oversized = oversizedRecordWarning(masterProfile.maxRecordBytes, state.shardBytes);
   if (oversized) warnings.push(oversized);
+  // Measured on the sampled records, so it says what THIS data does rather than guessing from names.
+  const locality = sortFieldLocality(data, state, costs.shardCount);
+  const sortLocality = locality[state.sortField];
+  if (sortLocality !== undefined && sortLocality.scatter > SCATTERED_SORT_FIELD_RATIO) {
+    const best = recommendedSortFieldFor(data, state, costs.shardCount);
+    const alternative = locality[best];
+    warnings.push(
+      `static-shard: sorting by "${state.sortField}" scatters the fields you filter on — even your best-clustered ` +
+        `filter ("${sortLocality.field}") would read about ${Math.round(sortLocality.scatter * 100)}% of your data files. ` +
+        (best !== state.sortField && alternative !== undefined
+          ? `Sorting by "${best}" would bring filters on "${alternative.field}" down to about ${Math.round(alternative.scatter * 100)}%.`
+          : `Filtering on the field you sort by is what makes that cheap.`),
+    );
+  }
   for (const [name, idx] of Object.entries(costs.indexes)) {
     if (idx.containsExceedsColumn) {
       warnings.push(
@@ -411,7 +594,7 @@ export function estimateForState(data: WizardData, state: WizardState): WizardEs
     return estimateIndexSize(profile, costs.shardCount, { indexChunkBytes: DEFAULT_INDEX_CHUNK_BYTES, ...opts });
   }
 
-  return { costs, warnings, masterProfile, probeIndex };
+  return { costs, warnings, locality, masterProfile, probeIndex };
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +764,9 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
     dim("  This decides which records are stored next to each other — the biggest lever on query cost."),
     dim("  Filters on this field read a few files; filters on anything else may read most of them."),
     dim("  Pick what you filter or sort by most. Text fields also get starts-with here for free."),
+    ...(Object.keys(estimate.locality).length > 0
+      ? [dim("  Measured on your data: how much of it your best-clustered filter would read under each choice.")]
+      : []),
     "",
   ];
   const filterLine = state.filterQuery ? [dim(`  filter: "${state.filterQuery}"`), ""] : [];
@@ -588,13 +774,23 @@ function renderSortField(data: WizardData, state: WizardState, estimate: WizardE
   const footer = ["", ...estimateAxes(estimate.costs).dataFiles, "", dim("  [↑/↓] move  [space] choose  [type] filter  [←/→] change step")];
   const chromeLines = header.length + filterLine.length + noMatchLine.length + footer.length;
 
+  // Mark the MEASURED best candidate, not a fixed guess: the recommendation reacts to whatever the
+  // user selected on the filter step, which is the only thing that makes locality meaningful.
+  const best = recommendedSortFieldFor(data, state, estimate.costs.shardCount);
   const { items, offset } = windowed(candidates, state.cursor, visibleRowsFor(terminalRows, chromeLines));
   const rows = items.map((f, i) => {
     const idx = offset + i;
     const selected = f.name === state.sortField;
     const marker = selected ? color(ANSI.green, "◉") : "○";
-    const rec = f.name === data.recommendedSortField ? color(ANSI.green, " ★ recommended") : "";
-    const plain = `  ${marker} ${pad(f.name, 22)} ${dim(pad(f.kind + " · " + fmtInt(f.cardinality) + " distinct", 28))}${rec}`;
+    const rec = f.name === best ? color(ANSI.green, " ★ recommended") : "";
+    // The consequence, measured on the user's own data rather than asserted: what share of the data
+    // files a query on their chosen filter fields would have to read under this sort field.
+    const measured = estimate.locality[f.name];
+    const cost =
+      measured === undefined
+        ? dim(pad(f.kind + " · " + fmtInt(f.cardinality) + " distinct", 40))
+        : dim(pad(`${f.kind} · ${f.name === measured.field ? "" : measured.field + " "}filters read ~${Math.round(measured.scatter * 100)}% of files`, 40));
+    const plain = `  ${marker} ${pad(f.name, 22)} ${cost}${rec}`;
     return renderRow(plain, { cursor: idx === state.cursor });
   });
 
@@ -764,11 +960,11 @@ export function renderFrame(
     case 0:
       body = renderDetect(data);
       break;
-    case 1:
-      body = renderSortField(data, state, estimate, terminalRows);
-      break;
-    case 2:
+    case FILTER_STAGE:
       body = renderFilterFields(data, state, estimate, terminalRows);
+      break;
+    case SORT_STAGE:
+      body = renderSortField(data, state, estimate, terminalRows);
       break;
     case 3:
       body = renderTextSearch(data, state, estimate, terminalRows);
