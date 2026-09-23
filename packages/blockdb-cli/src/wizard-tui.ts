@@ -1,12 +1,12 @@
 import readline from "node:readline";
 import path from "node:path";
-import { init, resolveInitConfig, sampleLimit, sampleRecords, type InitOptions, type InitResult } from "./init.js";
-import { countInputRecords, readInputRecords, type PopulationStats } from "./input.js";
+import { init, resolveInitConfig, sampleLimit, scanInput, type InitOptions, type InitResult } from "./init.js";
+import { countInputRecords, type PopulationStats } from "./input.js";
 import type { ProgressReporter } from "./progress.js";
 import {
   applyKey,
-  buildWizardData,
   createInitialState,
+  ESTIMATE_SAMPLE_MAX,
   deriveWizardChoices,
   estimateForState,
   renderFrame,
@@ -14,6 +14,7 @@ import {
   type WizardData,
   type WizardKey,
   type WizardState,
+  wizardDataFrom,
 } from "./wizard.js";
 import type { InputFormat } from "./types.js";
 
@@ -127,24 +128,23 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
   const resolvedInput = path.resolve(opts.cwd, inputPath);
   const readOpts = { format, delimiter, recordsPath: opts.records, fields: {} };
   // All the loading below happens BEFORE the wizard paints its first frame, so it's the one stretch
-  // where a `--full-scan` user stares at a blank terminal. Report it, then hand the screen over.
+  // where the user stares at a blank terminal. Report it, then hand the screen over.
   const progress = opts.progress;
-  const allRecords = readInputRecords(resolvedInput, {
-    ...readOpts,
-    // Shares `sampleLimit` with `init` rather than restating the rule — the two paths must read the
-    // same records or the wizard's recommendations drift from what `init --yes` would have written.
-    limit: sampleLimit(opts),
-    ...(progress ? { onProgress: progress.report } : {}),
-  });
-  const sample = sampleRecords(allRecords, opts);
-  // With a full scan the sample IS the whole dataset; otherwise count the true totals cheaply
-  // (NDJSON streamed, no parse) so the review screen and size estimates reflect the full input.
-  progress?.report({ phase: "measuring dataset", done: allRecords.length, unit: "count" });
-  const population: PopulationStats = opts.fullScan
-    ? { recordCount: allRecords.length, datasetBytes: allRecords.reduce((s, r) => s + Buffer.byteLength(JSON.stringify(r), "utf8"), 0) }
-    : countInputRecords(resolvedInput, { ...readOpts, ...(progress ? { onProgress: progress.report } : {}) });
-  // `buildWizardData` reports per field from here on (inference is the long pole on a full scan).
-  const data: WizardData = buildWizardData(sample, population, ...(progress ? [{ onProgress: progress.report }] : []));
+  // One streaming pass, shared with `init` so the wizard reads exactly the records `init --yes` would
+  // (including `sampleLimit`) and can't drift from what it would have written.
+  const limit = sampleLimit(opts);
+  const scan = scanInput(
+    resolvedInput,
+    { ...readOpts, limit, ...(progress ? { onProgress: progress.report } : {}) },
+    { estimateSample: ESTIMATE_SAMPLE_MAX, measureBytes: limit === undefined },
+  );
+  // A full read measured the dataset on the way; a sampled one counts the true totals cheaply (NDJSON
+  // streamed, no parse) so the review screen and size estimates reflect the full input.
+  const population: PopulationStats =
+    limit === undefined
+      ? scan.population
+      : countInputRecords(resolvedInput, { ...readOpts, ...(progress ? { onProgress: progress.report } : {}) });
+  const data: WizardData = wizardDataFrom(scan.inferred, scan.sample, population);
   // Loading done — clear the bar before the TUI takes over the screen.
   progress?.finish();
 

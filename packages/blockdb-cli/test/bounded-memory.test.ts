@@ -17,6 +17,7 @@ import type { BlockDbConfig, Manifest } from "../src/types.js";
  */
 const cliRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distBuild = path.join(cliRoot, "dist", "build.js");
+const distInit = path.join(cliRoot, "dist", "init.js");
 
 const RECORDS = 150_000;
 /** ~36 MB of NDJSON: the pre-streaming build runs out of memory on it at this heap size; the streaming one fits in half. */
@@ -65,7 +66,7 @@ afterAll(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("build memory (#28)", () => {
+describe("build and init memory (#28, #29)", () => {
   test.skipIf(!existsSync(distBuild))(
     `builds ${RECORDS.toLocaleString("en-US")} records inside a ${HEAP_MB} MB heap`,
     () => {
@@ -83,6 +84,28 @@ describe("build memory (#28)", () => {
       const manifest = JSON.parse(readFileSync(path.join(tmpDir, "out", "manifest.json"), "utf8")) as Manifest;
       expect(manifest.dataset.recordCount).toBe(RECORDS);
       expect(manifest.zonemap.id).toMatchObject({ splitPoints: expect.arrayContaining([1, RECORDS]) });
+    },
+    60_000,
+  );
+
+  test.skipIf(!existsSync(distInit))(
+    `init infers ${RECORDS.toLocaleString("en-US")} records inside a ${HEAP_MB} MB heap`,
+    () => {
+      // Inference streams too: it keeps counts per field, never the records (#29).
+      const script = `
+        import path from "node:path";
+        import { init } from ${JSON.stringify(distInit)};
+        const { config } = init({ cwd: process.cwd(), configPath: path.resolve("inferred.config.json"), yes: true, inputPath: "big.ndjson" });
+        console.log(JSON.stringify(config.schema));
+      `;
+      const out = execFileSync(process.execPath, [`--max-old-space-size=${HEAP_MB}`, "--input-type=module", "-e", script], {
+        cwd: tmpDir,
+        stdio: "pipe",
+      });
+
+      const schema = JSON.parse(out.toString()) as BlockDbConfig["schema"];
+      expect(schema.pk).toBe("id");
+      expect(schema.fields.group).toMatchObject({ kind: "string" });
     },
     60_000,
   );

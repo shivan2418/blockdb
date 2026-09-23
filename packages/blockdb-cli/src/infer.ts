@@ -43,20 +43,179 @@ const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 /** Share of sampled values that must match for the shape to be claimed — a stray outlier shouldn't hide it. */
 const SHAPE_MAJORITY = 0.9;
 
-function valueShapeOf(values: unknown[]): ValueShape {
-  const strings = values.filter((v): v is string => typeof v === "string");
-  if (strings.length === 0) return "text";
-  const urls = strings.filter((v) => URL_SHAPE_RE.test(v)).length;
-  if (urls >= strings.length * SHAPE_MAJORITY) return "url";
-  const uuids = strings.filter((v) => UUID_SHAPE_RE.test(v)).length;
-  if (uuids >= strings.length * SHAPE_MAJORITY) return "uuid";
-  return "text";
+/** Counts how many string values look like URLs or UUIDs, to name the field's `ValueShape`. */
+class ShapeCounter {
+  private strings = 0;
+  private urls = 0;
+  private uuids = 0;
+
+  add(value: string): void {
+    this.strings++;
+    if (URL_SHAPE_RE.test(value)) this.urls++;
+    else if (UUID_SHAPE_RE.test(value)) this.uuids++;
+  }
+
+  shape(): ValueShape {
+    if (this.strings === 0) return "text";
+    if (this.urls >= this.strings * SHAPE_MAJORITY) return "url";
+    if (this.uuids >= this.strings * SHAPE_MAJORITY) return "uuid";
+    return "text";
+  }
+}
+
+/**
+ * Distinct values a field may hold before its count switches from exact to estimated. Below it,
+ * inference is exact — every dataset up to a million records infers exactly as it would with the whole
+ * input in memory. Above it, memory would otherwise grow with the data, which is what inference over
+ * an input too big to hold can't afford (#29).
+ */
+export const EXACT_DISTINCT_MAX = 1_000_000;
+
+/** HyperLogLog precision: 2^14 registers, 16 KB per counter, standard error 1.04/√2^14 ≈ 0.8%. */
+const HLL_BITS = 14;
+const HLL_REGISTERS = 1 << HLL_BITS;
+/** Three standard errors: how far below the record count an estimate may sit and still read as "all distinct". */
+const HLL_UNIQUE_TOLERANCE = (3 * 1.04) / Math.sqrt(HLL_REGISTERS);
+
+/** cyrb53: a fast, well-mixed 53-bit string hash (public domain). 53 bits keeps collisions negligible at a million values. */
+function hash53(str: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+/** An open-addressing set of 53-bit hashes in one Float64Array — 16 bytes a value, against ~70 for a `Set<string>`. */
+class HashSet53 {
+  private table = new Float64Array(1024);
+  size = 0;
+
+  /** Adds `h`; false if it was already present. */
+  add(h: number): boolean {
+    const key = h === 0 ? 1 : h; // 0 marks an empty slot
+    if ((this.size + 1) * 2 > this.table.length) this.grow();
+    return this.insert(this.table, key);
+  }
+
+  has(h: number): boolean {
+    const key = h === 0 ? 1 : h;
+    const table = this.table;
+    const mask = table.length - 1;
+    for (let i = (key >>> 0) & mask; ; i = (i + 1) & mask) {
+      if (table[i] === 0) return false;
+      if (table[i] === key) return true;
+    }
+  }
+
+  private insert(table: Float64Array, key: number): boolean {
+    const mask = table.length - 1;
+    for (let i = (key >>> 0) & mask; ; i = (i + 1) & mask) {
+      if (table[i] === 0) {
+        table[i] = key;
+        if (table === this.table) this.size++;
+        return true;
+      }
+      if (table[i] === key) return false;
+    }
+  }
+
+  private grow(): void {
+    const old = this.table;
+    const next = new Float64Array(old.length * 2);
+    for (const key of old) if (key !== 0) this.insert(next, key);
+    this.table = next;
+  }
+}
+
+/**
+ * Counts a field's distinct values in bounded memory: exactly (by 53-bit hash) up to
+ * `EXACT_DISTINCT_MAX`, then by HyperLogLog estimate. The exact set is kept, frozen, past the cap, so a
+ * later repeat of any of the first million values still proves the field isn't unique.
+ */
+class DistinctCounter {
+  constructor(private readonly exactMax: number) {}
+
+  private readonly exact = new HashSet53();
+  private readonly registers = new Uint8Array(HLL_REGISTERS);
+  private overflowed = false;
+  private sawRepeat = false;
+  private added = 0;
+
+  add(key: string): void {
+    this.added++;
+    const h = hash53(key);
+
+    const register = h & (HLL_REGISTERS - 1);
+    const rest = Math.floor(h / HLL_REGISTERS); // the remaining 39 bits
+    const rank = rest === 0 ? 40 : 39 - Math.floor(Math.log2(rest)); // leading zeros + 1
+    if (rank > this.registers[register]!) this.registers[register] = rank;
+
+    if (!this.overflowed) {
+      if (!this.exact.add(h)) this.sawRepeat = true;
+      else if (this.exact.size > this.exactMax) this.overflowed = true;
+    } else if (this.exact.has(h)) {
+      this.sawRepeat = true;
+    }
+  }
+
+  /** Distinct values: exact below the cap, a HyperLogLog estimate (±~0.8%) above it. */
+  count(): number {
+    if (!this.overflowed) return this.exact.size;
+    return Math.min(this.added, Math.max(this.exactMax + 1, Math.round(this.estimate())));
+  }
+
+  /** Every value added was distinct — certain below the cap, judged within the estimate's error above it. */
+  allDistinct(): boolean {
+    if (this.sawRepeat) return false;
+    if (!this.overflowed) return true;
+    return this.estimate() >= this.added * (1 - HLL_UNIQUE_TOLERANCE);
+  }
+
+  private estimate(): number {
+    const m = HLL_REGISTERS;
+    let sum = 0;
+    let zeros = 0;
+    for (const r of this.registers) {
+      sum += 2 ** -r;
+      if (r === 0) zeros++;
+    }
+    const raw = ((0.7213 / (1 + 1.079 / m)) * m * m) / sum;
+    // Small-range correction (linear counting) — only reachable if the cap were set very low.
+    return raw <= 2.5 * m && zeros > 0 ? m * Math.log(m / zeros) : raw;
+  }
+}
+
+/** A value's identity for distinct counting — equal exactly when the two values' JSON is equal, without serializing strings. */
+function distinctKey(value: unknown): string {
+  switch (typeof value) {
+    case "string":
+      return "s" + value;
+    case "number":
+      return "n" + String(value);
+    case "boolean":
+      return value ? "t" : "f";
+    default:
+      return "j" + JSON.stringify(value);
+  }
 }
 
 export interface InferredField {
   kind: FieldKind;
-  /** Distinct non-null values observed (for multi fields: distinct elements across all arrays). */
+  /**
+   * Distinct non-null values observed (for multi fields: distinct elements across all arrays). Exact up
+   * to `EXACT_DISTINCT_MAX`, estimated (±~0.8%) above it.
+   */
   cardinality: number;
+  /** Every non-null value is different from every other — what makes a field pk-shaped. */
+  unique: boolean;
   /** The key was missing from at least one sampled record but present in another (absent ≠ null). */
   absent: boolean;
   /** At least one record held `null` for this key (null ≠ absent). */
@@ -85,101 +244,152 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
 
-function inferKind(fieldName: string, values: unknown[]): FieldKind {
-  const nonNull = values.filter((v) => v !== null);
-  if (nonNull.length === 0) return "string";
+/** Collects the distinct string values of a field up to `MAX_ENUM_VALUES`, giving up past it. */
+class EnumCollector {
+  private values: Set<string> | undefined = new Set();
 
-  const allBoolean = nonNull.every((v) => typeof v === "boolean");
-  if (allBoolean) return "boolean";
-  const allNumber = nonNull.every((v) => typeof v === "number");
-  if (allNumber) return "number";
-  const allString = nonNull.every((v) => typeof v === "string");
-  if (allString) {
-    const allDates = (nonNull as string[]).every((v) => ISO_DATE_RE.test(v));
-    return allDates ? "date" : "string";
+  add(value: string): void {
+    if (this.values === undefined || this.values.has(value)) return;
+    this.values.add(value);
+    if (this.values.size > MAX_ENUM_VALUES) this.values = undefined;
   }
 
-  // Nested objects and mixed-scalar-type fields aren't a queryable scalar kind — carry them as
-  // payload-only "json" (ADR-0001) rather than failing the whole init.
-  return "json";
-}
-
-function distinctCount(values: unknown[]): number {
-  const seen = new Set<string>();
-  for (const v of values) seen.add(JSON.stringify(v));
-  return seen.size;
-}
-
-/** A payload-only field: kept in the record and returned by `findMany`, never indexed or queryable (ADR-0001). */
-function payloadField(presentValues: unknown[], recordCount: number): InferredField {
-  return {
-    kind: "json",
-    cardinality: distinctCount(presentValues.filter((v) => v !== null)),
-    absent: presentValues.length < recordCount,
-    nullable: presentValues.some((v) => v === null),
-    multi: false,
-    shape: "text",
-  };
+  /** The sorted distinct values, or `undefined` for none or too many. */
+  result(): string[] | undefined {
+    return this.values === undefined || this.values.size === 0 ? undefined : [...this.values].sort();
+  }
 }
 
 /**
- * The sorted distinct values of an enum-like string field, or `undefined` when the field isn't one.
- * `date` is excluded deliberately: a closed set of dates is a coincidence of the sample, not a
- * domain enum, and freezing it would reject any later date.
+ * Everything inference needs to know about one field, gathered one record at a time. Holds counts,
+ * a capped enum set and bounded distinct counters — never the values themselves.
  */
-function enumValuesOf(kind: FieldKind, values: string[]): string[] | undefined {
-  if (kind !== "string") return undefined;
-  const distinct = [...new Set(values)];
-  if (distinct.length === 0 || distinct.length > MAX_ENUM_VALUES) return undefined;
-  return distinct.sort();
-}
+class FieldStats {
+  constructor(private readonly exactDistinctMax: number) {}
 
-function inferField(fieldName: string, presentValues: unknown[], recordCount: number): InferredField {
-  const nullable = presentValues.some((v) => v === null);
-  const arrays = presentValues.filter((v) => Array.isArray(v));
-  // `null` is a missing value, not a scalar: a list field with some null lists is still a list field.
-  const scalars = presentValues.filter((v) => !Array.isArray(v) && v !== null);
+  present = 0;
+  private nulls = 0;
 
-  // A field that mixes arrays and scalars can't be a single queryable kind — carry it as payload.
-  if (arrays.length > 0 && scalars.length > 0) {
-    return payloadField(presentValues, recordCount);
+  // Scalars (non-null, non-array)
+  private scalars = 0;
+  private booleans = 0;
+  private numbers = 0;
+  private strings = 0;
+  private allDates = true;
+  private scalarDistinct: DistinctCounter | undefined;
+  private readonly scalarEnum = new EnumCollector();
+  private readonly scalarShape = new ShapeCounter();
+
+  // Arrays
+  private arrays = 0;
+  private allStringArrays = true;
+  private arrayDistinct: DistinctCounter | undefined;
+  private elementDistinct: DistinctCounter | undefined;
+  private readonly elementEnum = new EnumCollector();
+  private readonly elementShape = new ShapeCounter();
+
+  add(value: unknown): void {
+    this.present++;
+    if (value === null) {
+      this.nulls++;
+      return;
+    }
+    if (Array.isArray(value)) {
+      this.arrays++;
+      // A mixed or payload field reports distinct whole values, so arrays are counted whole too.
+      (this.arrayDistinct ??= new DistinctCounter(this.exactDistinctMax)).add(distinctKey(value));
+      if (!this.allStringArrays) return;
+      if (!isStringArray(value)) {
+        // Only string[] is a queryable list field (T7); the element stats are moot from here on.
+        this.allStringArrays = false;
+        this.elementDistinct = undefined;
+        return;
+      }
+      const elements = (this.elementDistinct ??= new DistinctCounter(this.exactDistinctMax));
+      for (const element of value) {
+        elements.add(distinctKey(element));
+        this.elementEnum.add(element);
+        this.elementShape.add(element);
+      }
+      return;
+    }
+
+    this.scalars++;
+    (this.scalarDistinct ??= new DistinctCounter(this.exactDistinctMax)).add(distinctKey(value));
+    if (typeof value === "boolean") this.booleans++;
+    else if (typeof value === "number") this.numbers++;
+    else if (typeof value === "string") {
+      this.strings++;
+      if (this.allDates && !ISO_DATE_RE.test(value)) this.allDates = false;
+      this.scalarEnum.add(value);
+      this.scalarShape.add(value);
+    }
   }
 
-  if (arrays.length > 0) {
-    // Only string[] is a queryable multi-valued field (T7); number[]/object[]/mixed become payload.
-    if (!arrays.every(isStringArray)) {
-      return payloadField(presentValues, recordCount);
+  finish(recordCount: number): InferredField {
+    const absent = this.present < recordCount;
+    const nullable = this.nulls > 0;
+
+    // A field that mixes arrays and scalars can't be a single queryable kind, and a list of anything
+    // but strings isn't a queryable list — both are carried as payload.
+    if (this.arrays > 0 && (this.scalars > 0 || !this.allStringArrays)) {
+      const counters = [this.scalarDistinct, this.arrayDistinct].filter((c): c is DistinctCounter => c !== undefined);
+      return {
+        kind: "json",
+        cardinality: counters.reduce((sum, c) => sum + c.count(), 0),
+        unique: false,
+        absent,
+        nullable,
+        multi: false,
+        shape: "text",
+      };
     }
-    const elements = (arrays as string[][]).flat();
-    const elementValues = enumValuesOf("string", elements);
+
+    if (this.arrays > 0) {
+      const values = this.elementEnum.result();
+      return {
+        kind: "string",
+        cardinality: this.elementDistinct?.count() ?? 0,
+        unique: false,
+        absent,
+        nullable,
+        multi: true,
+        shape: this.elementShape.shape(),
+        ...(values ? { values } : {}),
+      };
+    }
+
+    const kind = this.scalarKind();
+    // `date` is excluded deliberately: a closed set of dates is a coincidence of the data, not a
+    // domain enum, and freezing it would reject any later date.
+    const values = kind === "string" ? this.scalarEnum.result() : undefined;
     return {
-      kind: "string",
-      cardinality: distinctCount(elements),
-      absent: presentValues.length < recordCount,
+      kind,
+      cardinality: this.scalarDistinct?.count() ?? 0,
+      unique: this.scalarDistinct?.allDistinct() ?? false,
+      absent,
       nullable,
-      multi: true,
-      shape: valueShapeOf(elements),
-      ...(elementValues ? { values: elementValues } : {}),
+      multi: false,
+      shape: this.scalarShape.shape(),
+      ...(values ? { values } : {}),
     };
   }
 
-  const kind = inferKind(fieldName, scalars);
-  const nonNull = scalars.filter((v) => v !== null);
-  const values = enumValuesOf(kind, nonNull.filter((v): v is string => typeof v === "string"));
-  return {
-    kind,
-    cardinality: distinctCount(nonNull),
-    absent: presentValues.length < recordCount,
-    nullable,
-    multi: false,
-    shape: valueShapeOf(nonNull),
-    ...(values ? { values } : {}),
-  };
+  private scalarKind(): FieldKind {
+    const n = this.scalars;
+    if (n === 0) return "string";
+    if (this.booleans === n) return "boolean";
+    if (this.numbers === n) return "number";
+    if (this.strings === n) return this.allDates ? "date" : "string";
+    // Nested objects and mixed-scalar-type fields aren't a queryable scalar kind — carry them as
+    // payload-only "json" (ADR-0001) rather than failing the whole init.
+    return "json";
+  }
 }
 
-/** A field is PK-shaped when its own sampled values look like an identifier: unique + id-like name. */
-function looksLikePk(name: string, f: InferredField, recordCount: number): boolean {
-  return !f.multi && !f.absent && !f.nullable && f.cardinality === recordCount && ID_LIKE_NAME_RE.test(name);
+/** A field is PK-shaped when its own values look like an identifier: present on every record, unique, id-like name. */
+function looksLikePk(name: string, f: InferredField): boolean {
+  return !f.multi && !f.absent && !f.nullable && f.unique && ID_LIKE_NAME_RE.test(name);
 }
 
 /** A field can be a sort-field candidate iff it's an always-present, single-valued sortable kind
@@ -215,8 +425,8 @@ function recommendSortField(fields: Record<string, InferredField>, recordCount: 
     // ADR-0002 §2: tiebreak toward the PK — judged directly off each candidate's own
     // uniqueness + id-like name, not by deferring to recommendPk (which runs after the
     // sort field is chosen, and pk may legitimately equal the sort field — ADR-0002 §4).
-    const aPkLike = looksLikePk(nameA, a, recordCount);
-    const bPkLike = looksLikePk(nameB, b, recordCount);
+    const aPkLike = looksLikePk(nameA, a);
+    const bPkLike = looksLikePk(nameB, b);
     if (aPkLike !== bPkLike) return aPkLike ? -1 : 1;
     return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
   });
@@ -224,10 +434,10 @@ function recommendSortField(fields: Record<string, InferredField>, recordCount: 
   return candidates[0]![0];
 }
 
-function recommendPk(fields: Record<string, InferredField>, recordCount: number): string | undefined {
+function recommendPk(fields: Record<string, InferredField>): string | undefined {
   // A pk may legitimately be the sort field itself — the "free" get(id) path (ADR-0002 §4).
   const idLike = Object.entries(fields)
-    .filter(([name, f]) => (f.kind === "number" || f.kind === "string") && looksLikePk(name, f, recordCount))
+    .filter(([name, f]) => (f.kind === "number" || f.kind === "string") && looksLikePk(name, f))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return idLike[0]?.[0];
 }
@@ -264,34 +474,70 @@ function recommendIndexedFields(fields: Record<string, InferredField>, recordCou
 }
 
 /**
- * Infers a candidate schema from a sample (or full scan) of parsed records — the only inference
- * site (ADR-0005 §4). Pure: no I/O, no defaults from config — `init` layers flags/existing-file
- * precedence on top of this recommendation.
+ * Infers a candidate schema one record at a time — the only inference site (ADR-0005 §4). Pure: no
+ * I/O, no defaults from config — `init` layers flags/existing-file precedence on top of this
+ * recommendation.
+ *
+ * Memory is bounded by field count, not record count (#29): each field keeps counts, a capped enum
+ * set and a distinct counter that is exact up to `EXACT_DISTINCT_MAX` and estimated past it. So `init`
+ * can read an input far bigger than memory in full, rather than guessing from its head.
  */
+export class SchemaInferrer {
+  private readonly stats = new Map<string, FieldStats>();
+  private recordCount = 0;
+  private readonly exactDistinctMax: number;
+
+  constructor(opts: { exactDistinctMax?: number } = {}) {
+    this.exactDistinctMax = opts.exactDistinctMax ?? EXACT_DISTINCT_MAX;
+  }
+
+  add(record: Record<string, unknown>): void {
+    this.recordCount++;
+    for (const key in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      let field = this.stats.get(key);
+      if (field === undefined) {
+        field = new FieldStats(this.exactDistinctMax);
+        this.stats.set(key, field);
+      }
+      field.add(record[key]);
+    }
+  }
+
+  /** Records seen so far. */
+  get size(): number {
+    return this.recordCount;
+  }
+
+  finish(): InferenceResult {
+    const recordCount = this.recordCount;
+    const fields: Record<string, InferredField> = {};
+    // Fields in order of first appearance, like the records' own keys.
+    for (const [name, field] of this.stats) fields[name] = field.finish(recordCount);
+
+    const sortField = recommendSortField(fields, recordCount);
+    const pk = recommendPk(fields);
+    const indexedFields = recommendIndexedFields(fields, recordCount, sortField);
+
+    return { recordCount, fields, sortField, pk, indexedFields };
+  }
+}
+
+/** How often `inferSchema` reports progress, in records. */
+const PROGRESS_EVERY = 10_000;
+
+/** `SchemaInferrer` over records already in memory. */
 export function inferSchema(
   records: Record<string, unknown>[],
   opts: { onProgress?: OnProgress } = {},
 ): InferenceResult {
-  const recordCount = records.length;
-  const fieldNames = new Set<string>();
-  for (const record of records) {
-    for (const key of Object.keys(record)) fieldNames.add(key);
-  }
-
-  // Per field, not one event for the whole pass: this is O(records x fields) and, once inference reads
-  // the entire input by default, it is the longest silence in `init` — 6.6s of a 10s run on a 532 MB
-  // file, all of it after the read bar has already finished. Per-field events make it visibly advance.
-  const fields: Record<string, InferredField> = {};
-  let inferred = 0;
-  for (const name of fieldNames) {
-    const presentValues = records.filter((r) => Object.prototype.hasOwnProperty.call(r, name)).map((r) => r[name]);
-    fields[name] = inferField(name, presentValues, recordCount);
-    opts.onProgress?.({ phase: `inferring schema (${name})`, done: ++inferred, total: fieldNames.size, unit: "count" });
-  }
-
-  const sortField = recommendSortField(fields, recordCount);
-  const pk = recommendPk(fields, recordCount);
-  const indexedFields = recommendIndexedFields(fields, recordCount, sortField);
-
-  return { recordCount, fields, sortField, pk, indexedFields };
+  const inferrer = new SchemaInferrer();
+  const report = (done: number) =>
+    opts.onProgress?.({ phase: "inferring schema", done, total: records.length, unit: "count" });
+  records.forEach((record, i) => {
+    inferrer.add(record);
+    if ((i + 1) % PROGRESS_EVERY === 0) report(i + 1);
+  });
+  report(records.length);
+  return inferrer.finish();
 }

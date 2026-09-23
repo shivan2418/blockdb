@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { MAX_ENUM_VALUES, inferSchema } from "../src/infer.js";
+import { MAX_ENUM_VALUES, SchemaInferrer, inferSchema } from "../src/infer.js";
 
 describe("inferSchema — field kind detection", () => {
   test("infers number/string/boolean from consistent sample values", () => {
@@ -334,21 +334,20 @@ describe("inferSchema — progress reporting", () => {
     tier: i % 2 === 0 ? "gold" : "silver",
   }));
 
-  test("reports advancing per-field progress, not one static line", () => {
-    // Inference is O(records x fields) and is the long silence after the read bar finishes — on a
-    // 532 MB input it is 6.6s of a 10s init. Per-field events are what make it visibly advance.
+  test("reports advancing progress by records inferred, reaching the total", () => {
+    // Inference is one pass over the records, so progress counts records, not fields.
+    const many = Array.from({ length: 25_000 }, (_, i) => ({ id: i, tier: i % 2 === 0 ? "gold" : "silver" }));
     const events: { phase: string; done?: number; total?: number }[] = [];
-    inferSchema(records, { onProgress: (e) => events.push({ phase: e.phase, done: e.done, total: e.total }) });
+    inferSchema(many, { onProgress: (e) => events.push({ phase: e.phase, done: e.done, total: e.total }) });
 
     expect(events.length).toBeGreaterThan(1);
     for (const e of events) {
       expect(e.phase).toMatch(/inferring/i);
-      expect(e.total).toBe(4); // id, year, title, tier
+      expect(e.total).toBe(many.length);
     }
-    // strictly advancing, and it reaches the end
     const done = events.map((e) => e.done ?? -1);
     expect(done).toEqual([...done].sort((a, b) => a - b));
-    expect(done[done.length - 1]).toBe(4);
+    expect(done[done.length - 1]).toBe(many.length);
   });
 
   test("works, and infers identically, with no reporter supplied", () => {
@@ -425,5 +424,57 @@ describe("inferSchema — value shape detection", () => {
   test("a multi-valued field's shape comes from its elements", () => {
     const rows = Array.from({ length: 30 }, (_, i) => ({ rank: i, links: [`https://x.test/a${i}`, `https://x.test/b${i}`] }));
     expect(inferSchema(rows).fields.links!.shape).toBe("url");
+  });
+});
+
+describe("SchemaInferrer — bounded memory past the exact-count cap (#29)", () => {
+  const CAP = 1000;
+  const N = 20_000;
+  const inferCapped = (records: Record<string, unknown>[]) => {
+    const inferrer = new SchemaInferrer({ exactDistinctMax: CAP });
+    for (const record of records) inferrer.add(record);
+    return inferrer.finish();
+  };
+
+  test("below the cap, streaming and in-memory inference agree exactly", () => {
+    const records = Array.from({ length: 500 }, (_, i) => ({ id: `r${i}`, year: 2000 + (i % 20), tier: i % 3 === 0 ? "gold" : "silver" }));
+    expect(inferCapped(records)).toEqual(inferSchema(records));
+  });
+
+  test("past the cap, cardinality is estimated within a few percent", () => {
+    const records = Array.from({ length: N }, (_, i) => ({ id: i, code: `c${i % 12_000}` }));
+    const { fields } = inferCapped(records);
+    expect(fields.id!.cardinality / N).toBeGreaterThan(0.97);
+    expect(fields.id!.cardinality).toBeLessThanOrEqual(N);
+    expect(fields.code!.cardinality / 12_000).toBeGreaterThan(0.97);
+    expect(fields.code!.cardinality / 12_000).toBeLessThan(1.03);
+  });
+
+  test("a unique id-like field past the cap is still recommended as the pk", () => {
+    const records = Array.from({ length: N }, (_, i) => ({ id: `id-${i}`, year: 2000 + (i % 30) }));
+    const result = inferCapped(records);
+    expect(result.fields.id!.unique).toBe(true);
+    expect(result.pk).toBe("id");
+  });
+
+  test("a late repeat of an early value disqualifies the pk, even past the cap", () => {
+    const records = Array.from({ length: N }, (_, i) => ({ id: `id-${i}`, year: 2000 + (i % 30) }));
+    records.push({ id: "id-7", year: 2001 }); // a duplicate of a value seen while counting exactly
+    const result = inferCapped(records);
+    expect(result.fields.id!.unique).toBe(false);
+    expect(result.pk).toBeUndefined();
+  });
+
+  test("a field with many duplicates past the cap is not unique", () => {
+    // Every value appears twice, the second time long after the exact set froze.
+    const records = Array.from({ length: N }, (_, i) => ({ id: `id-${i % (N / 2)}`, year: 2000 }));
+    expect(inferCapped(records).fields.id!.unique).toBe(false);
+  });
+
+  test("enum value sets and kinds don't depend on the cap", () => {
+    const records = Array.from({ length: N }, (_, i) => ({ id: i, rarity: ["common", "rare", "mythic"][i % 3], at: "2020-01-01" }));
+    const { fields } = inferCapped(records);
+    expect(fields.rarity!.values).toEqual(["common", "mythic", "rare"]);
+    expect(fields.at!.kind).toBe("date");
   });
 });

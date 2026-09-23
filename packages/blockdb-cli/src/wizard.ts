@@ -10,7 +10,8 @@ import {
   type IndexSizeEstimate,
 } from "./estimator.js";
 import { DEFAULT_INDEX_CHUNK_BYTES } from "./config.js";
-import { inferSchema, isSortFieldCandidate, type ValueShape } from "./infer.js";
+import { inferSchema, isSortFieldCandidate, type InferenceResult, type ValueShape } from "./infer.js";
+import { Reservoir } from "./reservoir.js";
 import { compareSortValues, type SortKind } from "./sort.js";
 import { valuesOf } from "./secondary-index.js";
 import type { PopulationStats } from "./input.js";
@@ -87,13 +88,34 @@ export interface WizardData {
 }
 
 /**
- * Builds the wizard's pure, in-memory model from a sample (or full scan) of parsed records via the
- * same `inferSchema` (T10) `init --yes` uses, so the wizard's recommendations never drift from the
- * non-interactive path's. The wizard always (re)infers fresh — mirroring `init --reinfer` — since
- * confirming/adjusting a fresh detection is what the six-stage flow (ADR-0006 §1) is for; reusing an
- * existing baked schema interactively is out of scope for T12 (already served by `init --yes` without
- * `--reinfer`).
+ * Builds the wizard's pure model from what one streaming pass over the input gathered (`scanInput`):
+ * the same `SchemaInferrer` (T10) `init --yes` uses, so the wizard's recommendations never drift from
+ * the non-interactive path's, plus a uniform sample for the live estimates. The wizard always
+ * (re)infers fresh — mirroring `init --reinfer` — since confirming/adjusting a fresh detection is what
+ * the six-stage flow (ADR-0006 §1) is for.
  */
+export function wizardDataFrom(
+  inferred: InferenceResult,
+  estimateRecords: Record<string, unknown>[],
+  population: PopulationStats,
+): WizardData {
+  const fields: WizardField[] = Object.entries(inferred.fields)
+    .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi, shape: f.shape }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+  return {
+    recordCount: population.recordCount,
+    fields,
+    recommendedSortField: inferred.sortField,
+    recommendedPk: inferred.pk,
+    recommendedIndexed: inferred.indexedFields,
+    sortCandidates: fields.filter(isSortFieldCandidate).map((f) => f.name),
+    records: estimateRecords,
+    population,
+  };
+}
+
+/** `wizardDataFrom` over records already in memory, which are then the whole dataset unless `population` says otherwise. */
 export function buildWizardData(
   records: Record<string, unknown>[],
   population?: PopulationStats,
@@ -102,30 +124,13 @@ export function buildWizardData(
   if (records.length === 0) {
     throw new Error("blockdb: the wizard found no records in the input to infer a schema from");
   }
-  // Inference sees every record it was given; only the estimate sample below is capped.
-  const inferred = inferSchema(records, opts);
-  const fields: WizardField[] = Object.entries(inferred.fields)
-    .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi, shape: f.shape }))
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-
-  const sortCandidates = fields.filter(isSortFieldCandidate).map((f) => f.name);
-
-  // Fall back to the sample as its own population when no true totals are supplied (records IS the dataset).
+  const reservoir = new Reservoir<Record<string, unknown>>(ESTIMATE_SAMPLE_MAX);
+  for (const record of records) reservoir.add(record);
   const pop: PopulationStats = population ?? {
     recordCount: records.length,
     datasetBytes: records.reduce((sum, r) => sum + Buffer.byteLength(JSON.stringify(r), "utf8"), 0),
   };
-
-  return {
-    recordCount: pop.recordCount,
-    fields,
-    recommendedSortField: inferred.sortField,
-    recommendedPk: inferred.pk,
-    recommendedIndexed: inferred.indexedFields,
-    sortCandidates,
-    records: records.length > ESTIMATE_SAMPLE_MAX ? records.slice(0, ESTIMATE_SAMPLE_MAX) : records,
-    population: pop,
-  };
+  return wizardDataFrom(inferSchema(records, opts), reservoir.sample, pop);
 }
 
 export interface WizardState {

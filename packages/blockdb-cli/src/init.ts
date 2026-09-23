@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { loadConfigFile, resolveConfig } from "./config.js";
-import { inferSchema, type ValueShape } from "./infer.js";
-import { readInputRecords } from "./input.js";
+import { SchemaInferrer, type InferenceResult, type ValueShape } from "./infer.js";
+import { Reservoir } from "./reservoir.js";
+import { iterateInputRecords, type InputReadOptions, type PopulationStats } from "./input.js";
 import type { OnProgress } from "./progress.js";
 import { unsuitableTextIndexWarning } from "./warnings.js";
 import type { FieldConfig, InputFormat, BlockDbConfig } from "./types.js";
@@ -17,20 +18,45 @@ export const DEFAULT_SAMPLE_SIZE = 1000;
  * Reading everything is the DEFAULT: inference decides the baked schema, and a schema wrong about
  * the data is the expensive kind of wrong — a value union missing a late value, a field that never
  * appeared in the first 1000 rows, a cardinality that misprices an index or picks the wrong sort
- * field. `build` already reads the whole input, so a full scan asks for no memory a build doesn't.
- * Sampling stays available for a fast look at a large file, but it is now opt-in.
+ * field. Inference streams, so a full read costs time, not memory (#29). Sampling stays available for
+ * a fast look at a large file, but it is opt-in.
  */
 export function sampleLimit(opts: { fullScan?: boolean; sampleSize?: number }): number | undefined {
   return opts.fullScan ? undefined : opts.sampleSize;
 }
 
-/** Shared by `init` and the wizard's live estimates (T12): applies `sampleLimit` to already-read records. */
-export function sampleRecords(
-  records: Record<string, unknown>[],
-  opts: { fullScan?: boolean; sampleSize?: number },
-): Record<string, unknown>[] {
-  const limit = sampleLimit(opts);
-  return limit === undefined ? records : records.slice(0, limit);
+export interface InputScan {
+  inferred: InferenceResult;
+  /** Up to `estimateSample` records drawn uniformly from everything read (`Reservoir`) — what the wizard's live estimates profile. */
+  sample: Record<string, unknown>[];
+  /** Record count and serialized bytes of everything read — bytes only when `measureBytes` was asked for. */
+  population: PopulationStats;
+}
+
+/**
+ * One streaming pass over the input for `init` and the wizard: infers the schema, draws the estimate
+ * sample and measures the dataset without ever holding more than one record plus the sample (#29).
+ * Shared so the two paths can't read the input differently and drift apart in what they recommend.
+ */
+export function scanInput(
+  inputPath: string,
+  readOpts: InputReadOptions,
+  opts: { estimateSample?: number; measureBytes?: boolean } = {},
+): InputScan {
+  const inferrer = new SchemaInferrer();
+  const reservoir = new Reservoir<Record<string, unknown>>(opts.estimateSample ?? 0);
+  let datasetBytes = 0;
+
+  for (const record of iterateInputRecords(inputPath, readOpts)) {
+    inferrer.add(record);
+    reservoir.add(record);
+    if (opts.measureBytes) datasetBytes += Buffer.byteLength(JSON.stringify(record), "utf8");
+  }
+
+  if (inferrer.size === 0) {
+    throw new Error(`blockdb: init found no records in "${inputPath}" to infer a schema from`);
+  }
+  return { inferred: inferrer.finish(), sample: reservoir.sample, population: { recordCount: inferrer.size, datasetBytes } };
 }
 
 /** Convention for editor JSON-schema resolution: `config.schema.json` ships inside the installed devDependency. */
@@ -252,7 +278,9 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
 
   if (reinferred) {
     const readDelimiter = delimiter ?? (format === "tsv" ? "\t" : ",");
-    const allRecords = readInputRecords(path.resolve(opts.cwd, inputPath), {
+    // Streams: inference holds counts per field, never the records, so reading everything is safe on
+    // any size of input (#29).
+    const { inferred } = scanInput(path.resolve(opts.cwd, inputPath), {
       format,
       delimiter: readDelimiter,
       recordsPath,
@@ -261,13 +289,6 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       limit: sampleLimit(opts),
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
     });
-    if (allRecords.length === 0) {
-      throw new Error(`blockdb: init found no records in "${inputPath}" to infer a schema from`);
-    }
-    const sample = sampleRecords(allRecords, opts);
-    // Inference reports per field (see `inferSchema`) — it walks every record once per field, so on a
-    // full scan it is the longest stretch of the run and needs to visibly advance, not just announce.
-    const inferred = inferSchema(sample, ...(opts.onProgress ? [{ onProgress: opts.onProgress }] : []));
 
     // `--reinfer` refreshes what init LEARNED from the data (kinds, absent/nullable, lists, value
     // sets) and keeps what the user CHOSE: the sort field, the pk, which fields are indexed and
