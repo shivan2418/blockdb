@@ -42,8 +42,8 @@ export function unselectiveTextIndexWarning(
     `blockdb: ${operator}(${field}): this index barely prunes — the average lookup resolves to ` +
     `${Math.round(meanPostings)} of ${blockCount} data files (${Math.round(ratio * 100)}%), so a query using it ` +
     `still reads most of the dataset. Typical of identifier, URL, or near-constant fields, whose substrings ` +
-    `are spread evenly across every file. equals/in/startsWith are already enabled and free for "${field}" — ` +
-    `consider turning ${operator} off.`
+    `are spread evenly across every file. equals/in/startsWith on "${field}" use its plain index and don't need ` +
+    `this one — consider turning ${operator} off.`
   );
 }
 
@@ -53,14 +53,21 @@ export function unselectiveTextIndexWarning(
  * build output, manifest bytes, and a chunk fetch per query. The house-number shape: sorted by street,
  * every common number sits in nearly every block.
  */
-export function unselectiveIndexWarning(field: string, meanPostings: number | undefined, blockCount: number): string | undefined {
+export function unselectiveIndexWarning(
+  field: string,
+  meanPostings: number | undefined,
+  blockCount: number,
+  textOptIns: readonly ("endsWith" | "contains")[] = [],
+): string | undefined {
   if (meanPostings === undefined || blockCount < MIN_BLOCKS_FOR_SELECTIVITY) return undefined;
   const ratio = meanPostings / blockCount;
   if (ratio <= UNSELECTIVE_POSTINGS_RATIO) return undefined;
+  // The text indexes are built on top of the plain one, so removing it means removing them too.
+  const alongWith = textOptIns.length === 0 ? "" : ` (and its ${textOptIns.map((op) => `"${op}"`).join(" and ")}, which need${textOptIns.length === 1 ? "s" : ""} the index)`;
   return (
     `blockdb: index(${field}): this index barely prunes — the average value appears in ` +
     `${Math.round(meanPostings)} of ${blockCount} data files (${Math.round(ratio * 100)}%). Consider removing ` +
-    `"indexed": true: "${field}" stays filterable as a rider next to a filter that prunes, and the build ` +
+    `"indexed": true${alongWith}: "${field}" stays filterable as a rider next to a filter that prunes, and the build ` +
     `drops this index's files.`
   );
 }

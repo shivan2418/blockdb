@@ -249,9 +249,9 @@ function applyFieldFlagOverrides(
       if (indexedWanted.has(name) || mustIndex) cfg.indexed = true;
       else {
         delete cfg.indexed;
-        // A value union and the text-index opt-ins only work on an indexed field, so they go with the
-        // index (unless their own flag asks for them below, which indexes the field again).
-        delete cfg.values;
+        // The text-index opt-ins are built on the plain index, so they go with it (unless their own flag
+        // asks for them below, which indexes the field again). A value union stays: it narrows the
+        // field's filters whether or not they prune.
         delete cfg.endsWith;
         delete cfg.contains;
       }
@@ -427,11 +427,11 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       const wantsIndex = priorField !== undefined ? priorField.indexed === true : defaultIndexed.has(name);
       const isIndexed = f.kind !== "json" && name !== sortField && (wantsIndex || f.multi);
       if (isIndexed) cfg.indexed = true;
-      // Only a queryable field's values are worth baking — that's what the union narrows. Whether a
-      // field HAS a union is the user's call once made (deleting `values` widens it on purpose), but
-      // its members are a fact, so an existing union is refreshed from the data.
-      const wantsValues = priorField === undefined || priorField.values !== undefined;
-      if (isIndexed && f.values && wantsValues) cfg.values = f.values;
+      // A new field gets a union when it's indexed, as on a first run. After that, whether a field HAS a
+      // union is the user's call (deleting `values` widens it on purpose, and a union narrows an
+      // unindexed field's filters too), but its members are a fact, so an existing union is refreshed.
+      const wantsValues = priorField === undefined ? isIndexed : priorField.values !== undefined;
+      if (f.values && wantsValues) cfg.values = f.values;
       if (f.multi) cfg.multi = true;
       // Facts about the data, recorded on every field so the generated record type tells the truth.
       // Which missing-value operators they unlock is decided later, from the field's role.
@@ -448,7 +448,7 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       // kind can't carry a tsType (config.ts rejects it).
       // `valuesType` is hand-authored (only the user knows two fields are the same concept), so
       // --reinfer must carry it over — but only while the field still HAS a value union to name.
-      if (isIndexed && f.values && priorField?.valuesType !== undefined) cfg.valuesType = priorField.valuesType;
+      if (cfg.values && priorField?.valuesType !== undefined) cfg.valuesType = priorField.valuesType;
       if (f.kind === "json" && priorField?.tsType !== undefined) {
         cfg.tsType = priorField.tsType;
         if (priorField.tsImport !== undefined) cfg.tsImport = priorField.tsImport;

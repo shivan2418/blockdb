@@ -386,8 +386,8 @@ describe("resolveConfig — enum-like value unions", () => {
     );
   });
 
-  test("rejects values on a non-indexed field — a union only narrows queryable fields", () => {
-    expect(() => resolveConfig(withField({ kind: "string", values: ["a"] }), "/repo")).toThrow(/not indexed/);
+  test("accepts values on an unindexed field: every field is queryable (ADR-0013), so the union narrows its filters too", () => {
+    expect(() => resolveConfig(withField({ kind: "string", values: ["a"] }), "/repo")).not.toThrow();
   });
 
   test("rejects an empty values array rather than emitting an uninhabitable union", () => {

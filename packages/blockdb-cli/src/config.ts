@@ -129,13 +129,8 @@ export function resolveConfig(config: BlockDbConfig, baseDir: string): ResolvedC
           `blockdb: field "${name}" declares "values" but is kind "${field.kind}" — a value union requires kind: "string"`,
         );
       }
-      // The sort field is implicitly indexed (it prunes via split-points), so it needs no explicit
-      // `indexed: true` — and since string sort fields are allowed, it can legitimately be valued.
-      if (field.indexed !== true && !isSortField) {
-        throw new Error(
-          `blockdb: field "${name}" declares "values" but is not indexed — a value union only narrows queryable fields, so set indexed: true or remove "values"`,
-        );
-      }
+      // No `indexed` requirement: since ADR-0013 every field is queryable, and a value union narrows
+      // the generated types of an unindexed field's filters just the same.
       if (field.values.length === 0) {
         throw new Error(
           `blockdb: field "${name}" declares an empty "values" array — remove it to leave the field typed as plain string`,

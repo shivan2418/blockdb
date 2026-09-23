@@ -528,6 +528,23 @@ describe("seam #1 — unindexed fields and useless indexes (ADR-0013)", () => {
     expect(warnings.find((w) => /index\(even\)/.test(w))).toMatch(/stays filterable as a rider/);
   });
 
+  test("following the barely-prunes advice builds: a value union stays, and the advice names text opt-ins that go with the index", () => {
+    const tones = flags.map((r) => ({ ...r, tone: r.even ? "light" : "dark" }));
+    writeFileSync(path.join(tmpDir, "flags.ndjson"), tones.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const withTone = (tone: BlockDbConfig["schema"]["fields"][string]): BlockDbConfig => ({
+      ...flagConfig,
+      schema: { ...flagConfig.schema, fields: { ...flagConfig.schema.fields, tone } },
+    });
+
+    const valued = build(withTone({ kind: "string", indexed: true, values: ["dark", "light"] }), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    expect(valued.warnings.find((w) => /index\(tone\)/.test(w))).toMatch(/Consider removing "indexed": true: /);
+    const unindexed = build(withTone({ kind: "string", values: ["dark", "light"] }), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    expect(readFileSync(path.join(unindexed.clientOutDir, "schema.ts"), "utf8")).toMatch(/tone: \{ kind: "string", operators: \[[^\]]*\], pruning: \[\], values: \["dark", "light"\]/);
+
+    const searchable = build(withTone({ kind: "string", indexed: true, contains: true }), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    expect(searchable.warnings.find((w) => /index\(tone\)/.test(w))).toMatch(/Consider removing "indexed": true \(and its "contains", which needs the index\)/);
+  });
+
   test("an unindexed field is in the generated schema, queryable, with nothing that prunes", () => {
     writeFileSync(path.join(tmpDir, "flags.ndjson"), flags.map((r) => JSON.stringify(r)).join("\n") + "\n");
     const unindexed: BlockDbConfig = {

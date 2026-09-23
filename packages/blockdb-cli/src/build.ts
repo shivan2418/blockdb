@@ -195,7 +195,9 @@ export function materialize(
     indexChunkDirs[name] = addIndexChunks(name, null, built.chunks);
     // A list field can't be unindexed (ADR-0010), so there's no cheaper alternative to suggest.
     if (resolved.fields[name]!.multi !== true) {
-      const unselectiveIndex = unselectiveIndexWarning(name, meanPostingsLength(built.chunks), blocks.length);
+      const field = resolved.fields[name]!;
+      const textOptIns = (["endsWith", "contains"] as const).filter((op) => field[op] === true);
+      const unselectiveIndex = unselectiveIndexWarning(name, meanPostingsLength(built.chunks), blocks.length, textOptIns);
       if (unselectiveIndex) warnings.push(unselectiveIndex);
     }
 

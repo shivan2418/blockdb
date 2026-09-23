@@ -161,7 +161,7 @@
           },
           "minItems": 1,
           "uniqueItems": true,
-          "description": "The field's closed value set. Codegen exports it as a named union and narrows equals/in/some to it (fragment operators startsWith/contains/endsWith stay wide). Inferred for enum-like fields; delete it to widen the field back to plain string. Requires kind \"string\" and indexed: true."
+          "description": "The field's closed value set. Codegen exports it as a named union and narrows equals/in/some to it (fragment operators startsWith/contains/endsWith stay wide). Inferred for enum-like fields; delete it to widen the field back to plain string. Requires kind \"string\"."
         },
         "valuesType": {
           "type": "string",
@@ -298,15 +298,9 @@
             ]
           },
           "then": {
-            "required": [
-              "indexed"
-            ],
             "properties": {
               "kind": {
                 "const": "string"
-              },
-              "indexed": {
-                "const": true
               }
             }
           }
