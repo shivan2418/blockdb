@@ -144,7 +144,11 @@
         },
         "absent": {
           "type": "boolean",
-          "description": "Value may be missing from a record (absent ≠ null) — unlocks isNull/isAbsent/exists. Requires indexed: true."
+          "description": "The key may be missing from a record (absent ≠ null). Types the field optional; on an indexed, single-valued, non-sort field it also unlocks isAbsent and exists. Inferred by init; build fails if a record lacks the key and this is not set."
+        },
+        "nullable": {
+          "type": "boolean",
+          "description": "The value may be null (null ≠ absent). Types the field `T | null`; on an indexed, single-valued, non-sort field it also unlocks isNull and exists. Inferred by init; build fails if a record holds null and this is not set."
         },
         "multi": {
           "type": "boolean",

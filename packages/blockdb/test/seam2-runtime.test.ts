@@ -892,7 +892,7 @@ const t7Config: BlockDbConfig = {
     fields: {
       year: { kind: "number" },
       title: { kind: "string", indexed: true },
-      tagline: { kind: "string", indexed: true, absent: true },
+      tagline: { kind: "string", indexed: true, absent: true, nullable: true },
       genres: { kind: "string", indexed: true, multi: true },
     },
   },
@@ -1058,7 +1058,7 @@ const listConfig: BlockDbConfig = {
     fields: {
       year: { kind: "number" },
       title: { kind: "string" },
-      colors: { kind: "string", indexed: true, multi: true },
+      colors: { kind: "string", indexed: true, multi: true, absent: true },
     },
   },
 };

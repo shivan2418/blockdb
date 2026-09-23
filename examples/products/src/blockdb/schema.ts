@@ -23,7 +23,7 @@ export const schema = {
       category: { kind: "string", operators: ["equals", "in", "startsWith", "not"], values: ["Electronics", "Fitness", "Garden", "Kitchen", "Office", "Outdoors", "Stationery", "Toys"] },
       price: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"] },
       inStock: { kind: "boolean", operators: ["equals", "not"] },
-      discountPct: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"], absent: true },
+      discountPct: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not", "isAbsent", "exists"], absent: true },
     },
   },
 } as const;

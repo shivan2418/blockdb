@@ -284,31 +284,22 @@ describe("resolveConfig — multi/absent opt-ins (T7)", () => {
     expect(() => resolveConfig(bad, "/repo")).toThrow(/year.*sort field/i);
   });
 
-  test("rejects absent on a non-indexed field", () => {
-    const bad: BlockDbConfig = {
-      ...base,
-      schema: { sortField: "year", fields: { ...base.schema.fields, title: { kind: "string", absent: true } } },
-    };
-    expect(() => resolveConfig(bad, "/repo")).toThrow(/title.*indexed|indexed.*title/i);
-  });
-
-  test("rejects absent on the sort field itself", () => {
-    const bad: BlockDbConfig = {
-      ...base,
-      schema: { sortField: "year", fields: { ...base.schema.fields, year: { kind: "number", absent: true } } },
-    };
-    expect(() => resolveConfig(bad, "/repo")).toThrow(/year.*sort field/i);
-  });
-
-  test("rejects a field opting into both multi and absent (element-presence semantics are unsupported)", () => {
-    const bad: BlockDbConfig = {
+  // absent/nullable describe the data (they shape the generated record type), so they're valid on
+  // any field; which missing-value operators they unlock is decided from the field's role.
+  test("accepts absent and nullable on a non-indexed field, the sort field and a multi field", () => {
+    const ok: BlockDbConfig = {
       ...base,
       schema: {
         sortField: "year",
-        fields: { ...base.schema.fields, title: { kind: "string", indexed: true, multi: true, absent: true } },
+        fields: {
+          ...base.schema.fields,
+          year: { kind: "number", absent: true, nullable: true },
+          title: { kind: "string", absent: true, nullable: true },
+          tags: { kind: "string", indexed: true, multi: true, absent: true, nullable: true },
+        },
       },
     };
-    expect(() => resolveConfig(bad, "/repo")).toThrow(/title.*multi.*absent|absent.*multi/i);
+    expect(() => resolveConfig(ok, "/repo")).not.toThrow();
   });
 });
 
@@ -363,6 +354,18 @@ describe("resolveConfig — pk opt-in (T8)", () => {
       },
     };
     expect(() => resolveConfig(bad, "/repo")).toThrow(/title.*present|present.*title/i);
+  });
+
+  test("rejects pk on a nullable field", () => {
+    const bad: BlockDbConfig = {
+      ...base,
+      schema: {
+        sortField: "year",
+        pk: "title",
+        fields: { ...base.schema.fields, title: { kind: "string", indexed: true, nullable: true } },
+      },
+    };
+    expect(() => resolveConfig(bad, "/repo")).toThrow(/title.*null/i);
   });
 });
 

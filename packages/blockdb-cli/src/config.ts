@@ -242,22 +242,6 @@ export function resolveConfig(config: BlockDbConfig, baseDir: string): ResolvedC
       if (field.indexed !== true) {
         throw new Error(`blockdb: field "${name}" opts into "multi" but is not indexed — set indexed: true first (T7)`);
       }
-      if (field.absent) {
-        throw new Error(
-          `blockdb: field "${name}" opts into both "multi" and "absent" — presence semantics over a multi-valued field's elements are not supported (T7)`,
-        );
-      }
-    }
-
-    if (field.absent) {
-      if (isSortField) {
-        throw new Error(
-          `blockdb: field "${name}" opts into "absent" but is the sort field — presence semantics are not supported on the sort field`,
-        );
-      }
-      if (field.indexed !== true) {
-        throw new Error(`blockdb: field "${name}" opts into "absent" but is not indexed — set indexed: true first (T7)`);
-      }
     }
   }
 
@@ -272,6 +256,9 @@ export function resolveConfig(config: BlockDbConfig, baseDir: string): ResolvedC
     }
     if (pkFieldConfig.absent) {
       throw new Error(`blockdb: config.schema.pk "${pk}" opts into "absent" — a primary key must always be present`);
+    }
+    if (pkFieldConfig.nullable) {
+      throw new Error(`blockdb: config.schema.pk "${pk}" opts into "nullable" — a primary key can't be null`);
     }
     if (pk !== sortField && pkFieldConfig.indexed !== true) {
       throw new Error(

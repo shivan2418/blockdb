@@ -14,8 +14,10 @@ export interface FieldSchemaEntry {
   isDate: boolean;
   indexed: boolean;
   operators: readonly string[];
-  /** Value may be missing from a record (absent ≠ null) — unlocks isNull/isAbsent/exists (T7). */
+  /** The key may be missing from a record (absent ≠ null). */
   absent?: true;
+  /** The value may be `null` (null ≠ absent). */
+  nullable?: true;
   /** Scalar leaf under an object-array — value is an array, matched existentially via `some` (T7). */
   multi?: true;
   /** Present (`true`) only for the user PK field (T8). */

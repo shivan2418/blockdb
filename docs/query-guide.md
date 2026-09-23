@@ -45,7 +45,7 @@ Every example below queries one collection, `books`, built from records like thi
     "author":     { "kind": "string", "indexed": true, "endsWith": true },
     "published":  { "kind": "date", "indexed": true },
     "pages":      { "kind": "number", "indexed": true },
-    "rating":     { "kind": "number", "indexed": true, "absent": true },
+    "rating":     { "kind": "number", "indexed": true, "absent": true, "nullable": true },
     "inStock":    { "kind": "boolean", "indexed": true },
     "language":   { "kind": "string", "indexed": true, "values": ["de", "en", "es", "fr"] },
     "tags":       { "kind": "string", "indexed": true, "multi": true,
@@ -114,7 +114,8 @@ await db.books.findMany({
 | Indexed number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` |
 | Indexed boolean | `equals` `not` |
 | Indexed list (`"multi": true`) | `some` `every` `hasEvery` `isEmpty` |
-| Any of the above with `"absent": true` | also `isNull` `isAbsent` `exists` |
+| Indexed, not a list, with `"nullable": true` | also `isNull` `exists` |
+| Indexed, not a list, with `"absent": true` | also `isAbsent` `exists` |
 
 ## Strings
 
@@ -181,7 +182,12 @@ await db.books.findMany({ where: { inStock: { equals: true } } });
 
 ## Missing values: null and absent
 
-blockdb distinguishes a field that is `null` from one that is missing from the record ("absent"). A field marked `"absent": true` gets three operators:
+blockdb distinguishes a field that is `null` from one that is missing from the record ("absent"), and the config records which of the two each field can be. `init` detects both from the data:
+
+- `"nullable": true`: some records hold `null`. The generated type is `T | null`, and the field gets `isNull` and `exists`.
+- `"absent": true`: some records lack the key. The generated type is optional (`field?: T`), and the field gets `isAbsent` and `exists`.
+
+`rating` is both, so its type is `rating?: number | null` and it gets all three operators:
 
 ```ts
 await db.books.findMany({ where: { rating: { isNull: true } } });   // rating: null
@@ -192,7 +198,7 @@ await db.books.findMany({ where: { rating: { exists: false } } });  // null or a
 
 A missing value never matches a comparison: `rating: { gt: 4.5 }`, `rating: { equals: 5 }` and `rating: { not: 5 }` all skip records whose rating is null or absent.
 
-`init` sets `"absent": true` when a key is missing from some records. It does not yet notice a field that is always present but sometimes `null`: set `"absent": true` on such a field yourself to get `isNull` and `exists`.
+The flags keep the generated types honest, so `build` enforces them: if your data gains a `null` or loses a key where the config doesn't allow it, the build fails and says which flag to add (or run `blockdb init --reinfer`). The operators are only offered on indexed fields other than the sort field and list fields, but the flags shape the record type on every field.
 
 ## `not`
 
@@ -359,7 +365,7 @@ The generated types reject, at compile time:
 - a field that isn't queryable: unknown, not indexed, or a `json` payload
 - an operator the field doesn't have, such as `contains` without the opt-in, or a range on a secondary string field
 - a value outside a field's value union
-- `isNull`, `isAbsent` or `exists` on a field without `"absent": true`
+- `isNull` on a field that isn't `nullable`, `isAbsent` on one that isn't `absent`, and `exists` on one that's neither
 - a `where` whose only operator is `not`
 - `get` on a collection without a primary key
 - `orderBy` on a field that isn't queryable

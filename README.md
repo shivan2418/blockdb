@@ -34,8 +34,8 @@ The problem — *query a big dataset in the browser, with no database server and
 
 blockdb splits your data into **many small whole files** at build time, indexes them, and generates a **typed client** that fetches only the files a query needs. That trade buys three things the one-big-file approach can't easily get:
 
-- **Runs on any static host.** It fetches whole files by URL — no HTTP Range support required. GitHub Pages, S3, an old nginx, a corporate proxy: if it can serve a file, it works.
-- **Compression actually works.** Range requests and on-the-fly gzip/brotli fight each other (byte offsets shift once compressed), so the one-file camp often has to serve data *uncompressed*. Whole-file blocks compress end-to-end — a big deal for JSON, which shrinks 5–10×.
+- **Doesn't depend on HTTP Range.** Most major hosts do answer Range requests — GitHub Pages, S3/CloudFront and Cloudflare all return `206 Partial Content` — so the point isn't that Range is unavailable. It's that Range is fragile: a CDN that falls back to a full `200`, a proxy that drops the header, or a host that compresses the response turns a one-page read into a whole-file download or a broken query. blockdb fetches whole files by URL, so anything that can serve a file works.
+- **Compression actually works.** When a host compresses on the fly, a byte range applies to the *compressed* bytes (GitHub Pages does this), and Cloudflare ignores `Range` entirely when it has to decompress a response. So range-reading tools must serve their data file uncompressed and keep the host from compressing it; sql.js-httpvfs [broke on GitHub Pages in 2025](https://github.com/orgs/community/discussions/162857) for exactly this reason. Whole-file blocks compress end-to-end, by the host or at build time — a big deal for JSON, which shrinks 5–10×.
 - **A typed client, no engine.** The generated client is small JS with no multi-MB WASM to download and compile before the first query. Your fields and per-field operators are typed from the data.
 - **Zero dependencies.** Neither package has a single runtime dependency: the runtime and the CLI are each one package that installs nothing else. Nothing to audit, no transitive update to break your build, and the runtime ships nothing to the browser beyond its own code.
 
@@ -59,7 +59,7 @@ For the no-backend / static-hosting case specifically, here's the landscape and 
 |------|--------------|---------------------------|
 | **A backend + DB + API** (Postgres/Mongo + REST/GraphQL) | A server runs queries against a database | The data mutates, needs auth or private data, must be always-fresh, or needs joins / aggregations / full SQL. |
 | **Just load the whole file** | `fetch()` the entire JSON and filter in memory | The dataset is small (a few MB or less) — below that, partitioning is pure overhead. |
-| **sql.js-httpvfs** (phiresky) | SQLite → WASM, reads pages of one file via HTTP Range | You need full read-only **SQL** (joins, aggregates), your host supports Range, and WASM + a largely-uncompressed DB file is acceptable. |
+| **sql.js-httpvfs** (phiresky) | SQLite → WASM, reads pages of one file via HTTP Range | You need full read-only **SQL** (joins, aggregates, OR, exact counts), your host answers Range requests without compressing the DB file, and WASM + an uncompressed DB file is acceptable. |
 | **DuckDB-WASM + Parquet** | WASM SQL engine, range-reads Parquet row groups, prunes via column stats | You run heavy **analytical / aggregation** queries over columnar data and can afford a multi-MB WASM engine. |
 | **hyparquet** | Pure-JS (no WASM) Parquet reader, range-fetches column chunks | You want to read **existing Parquet** files in the browser without WASM. |
 | **PMTiles** | Single-file archive with an internal directory → any record in ≤2 range reads | Your data is **map tiles** or a key→blob archive served from one file. |

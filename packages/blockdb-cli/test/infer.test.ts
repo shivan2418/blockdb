@@ -70,6 +70,20 @@ describe("inferSchema — cardinality / absent / multi", () => {
       { year: 2000, tagline: null },
     ];
     expect(inferSchema(records).fields.tagline!.absent).toBe(false);
+    expect(inferSchema(records).fields.tagline!.nullable).toBe(true);
+  });
+
+  test("flags a field nullable only when some record holds null, independent of absent", () => {
+    const records = [{ year: 1999, tagline: "hello", score: 1 }, { year: 2000, score: null }];
+    const { fields } = inferSchema(records);
+    expect(fields.tagline).toMatchObject({ absent: true, nullable: false });
+    expect(fields.score).toMatchObject({ absent: false, nullable: true, kind: "number" });
+    expect(fields.year!.nullable).toBe(false);
+  });
+
+  test("a list field with some null lists stays a list field, flagged nullable", () => {
+    const records = [{ year: 1999, tags: ["a", "b"] }, { year: 2000, tags: null }, { year: 2001, tags: [] }];
+    expect(inferSchema(records).fields.tags).toMatchObject({ kind: "string", multi: true, nullable: true, absent: false });
   });
 
   test("detects a multi-valued field from consistent string-array values", () => {
@@ -225,6 +239,11 @@ describe("inferSchema — sort field recommendation", () => {
 });
 
 describe("inferSchema — pk recommendation", () => {
+  test("never recommends a field holding null as pk", () => {
+    const records = [{ id: "p1", year: 1999 }, { id: null, year: 2000 }, { id: "p3", year: 2001 }];
+    expect(inferSchema(records).pk).toBeUndefined();
+  });
+
   test("recommends an id-named field that is unique across the sample", () => {
     const records = [
       { id: "p1", year: 1999 },

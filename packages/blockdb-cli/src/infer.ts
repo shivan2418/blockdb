@@ -59,6 +59,8 @@ export interface InferredField {
   cardinality: number;
   /** The key was missing from at least one sampled record but present in another (absent ≠ null). */
   absent: boolean;
+  /** At least one record held `null` for this key (null ≠ absent). */
+  nullable: boolean;
   /** Every observed value was a string[] — a scalar leaf under an object-array (ADR-0001). */
   multi: boolean;
   /**
@@ -114,6 +116,7 @@ function payloadField(presentValues: unknown[], recordCount: number): InferredFi
     kind: "json",
     cardinality: distinctCount(presentValues.filter((v) => v !== null)),
     absent: presentValues.length < recordCount,
+    nullable: presentValues.some((v) => v === null),
     multi: false,
     shape: "text",
   };
@@ -132,8 +135,10 @@ function enumValuesOf(kind: FieldKind, values: string[]): string[] | undefined {
 }
 
 function inferField(fieldName: string, presentValues: unknown[], recordCount: number): InferredField {
+  const nullable = presentValues.some((v) => v === null);
   const arrays = presentValues.filter((v) => Array.isArray(v));
-  const scalars = presentValues.filter((v) => !Array.isArray(v));
+  // `null` is a missing value, not a scalar: a list field with some null lists is still a list field.
+  const scalars = presentValues.filter((v) => !Array.isArray(v) && v !== null);
 
   // A field that mixes arrays and scalars can't be a single queryable kind — carry it as payload.
   if (arrays.length > 0 && scalars.length > 0) {
@@ -151,6 +156,7 @@ function inferField(fieldName: string, presentValues: unknown[], recordCount: nu
       kind: "string",
       cardinality: distinctCount(elements),
       absent: presentValues.length < recordCount,
+      nullable,
       multi: true,
       shape: valueShapeOf(elements),
       ...(elementValues ? { values: elementValues } : {}),
@@ -164,6 +170,7 @@ function inferField(fieldName: string, presentValues: unknown[], recordCount: nu
     kind,
     cardinality: distinctCount(nonNull),
     absent: presentValues.length < recordCount,
+    nullable,
     multi: false,
     shape: valueShapeOf(nonNull),
     ...(values ? { values } : {}),
@@ -172,7 +179,7 @@ function inferField(fieldName: string, presentValues: unknown[], recordCount: nu
 
 /** A field is PK-shaped when its own sampled values look like an identifier: unique + id-like name. */
 function looksLikePk(name: string, f: InferredField, recordCount: number): boolean {
-  return !f.multi && !f.absent && f.cardinality === recordCount && ID_LIKE_NAME_RE.test(name);
+  return !f.multi && !f.absent && !f.nullable && f.cardinality === recordCount && ID_LIKE_NAME_RE.test(name);
 }
 
 /** A field can be a sort-field candidate iff it's an always-present, single-valued sortable kind

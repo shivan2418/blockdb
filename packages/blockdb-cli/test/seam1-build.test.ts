@@ -931,7 +931,8 @@ void invalid;
         fields: {
           year: { kind: "number" },
           title: { kind: "string", indexed: true },
-          tagline: { kind: "string", indexed: true, absent: true },
+          tagline: { kind: "string", indexed: true, absent: true, nullable: true },
+          studio: { kind: "string", indexed: true, nullable: true },
           genres: { kind: "string", indexed: true, multi: true },
         },
       },
@@ -939,10 +940,10 @@ void invalid;
     writeFileSync(
       path.join(tmpDir, "movies.ndjson"),
       [
-        { year: 1999, title: "The Matrix", genres: ["Sci-Fi", "Action"], tagline: "Welcome to the Real World" },
-        { year: 2000, title: "Gladiator", genres: ["Action", "Drama"] },
-        { year: 2000, title: "Snatch", genres: ["Crime", "Comedy"], tagline: null },
-        { year: 2008, title: "The Dark Knight", genres: ["Action", "Crime"], tagline: "Why So Serious?" },
+        { year: 1999, title: "The Matrix", genres: ["Sci-Fi", "Action"], tagline: "Welcome to the Real World", studio: "WB" },
+        { year: 2000, title: "Gladiator", genres: ["Action", "Drama"], studio: null },
+        { year: 2000, title: "Snatch", genres: ["Crime", "Comedy"], tagline: null, studio: "Columbia" },
+        { year: 2008, title: "The Dark Knight", genres: ["Action", "Crime"], tagline: "Why So Serious?", studio: "WB" },
       ]
         .map((m) => JSON.stringify(m))
         .join("\n") + "\n",
@@ -964,8 +965,20 @@ async function valid() {
   await db.movies.findMany({ where: { tagline: { isAbsent: true } } });
   await db.movies.findMany({ where: { tagline: { exists: false } } });
 
+  // A nullable-only field gets isNull and exists, but not isAbsent.
+  await db.movies.findMany({ where: { studio: { isNull: true } } });
+  await db.movies.findMany({ where: { studio: { exists: true } } });
+
   // \`not\` alongside a real pruning constraint on the SAME field compiles and runs.
   await db.movies.findMany({ where: { title: { not: "Gladiator", startsWith: "G" } } });
+
+  // The record type says what the data can hold: optional for absent, | null for nullable.
+  const { records } = await db.movies.findMany({ limit: 1 });
+  const movie = records[0]!;
+  const tagline: string | null | undefined = movie.tagline;
+  const studio: string | null = movie.studio;
+  void tagline;
+  void studio;
 }
 
 async function invalid() {
@@ -984,6 +997,19 @@ async function invalid() {
   await db.movies.findMany({ where: { title: { isAbsent: true } } });
   // @ts-expect-error
   await db.movies.findMany({ where: { title: { exists: true } } });
+
+  // isAbsent on a field whose key is never missing.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { studio: { isAbsent: true } } });
+
+  // The record type admits null and absence, so narrowing is required before use as a string.
+  const { records } = await db.movies.findMany({ limit: 1 });
+  // @ts-expect-error
+  const tagline: string = records[0]!.tagline;
+  // @ts-expect-error
+  const studio: string = records[0]!.studio;
+  void tagline;
+  void studio;
 
   // \`not\` as the SOLE constraint — RiderGuard rejects it (no pruning companion).
   // @ts-expect-error
@@ -1005,7 +1031,7 @@ void invalid;
         fields: {
           year: { kind: "number" },
           title: { kind: "string", indexed: true },
-          genres: { kind: "string", indexed: true, multi: true, values: ["Action", "Drama", "Crime"] },
+          genres: { kind: "string", indexed: true, multi: true, absent: true, values: ["Action", "Drama", "Crime"] },
         },
       },
     };
@@ -1493,8 +1519,12 @@ describe("seam #1 — external sort scale hardening (T13)", () => {
       { title: "Untitled Absent" },
     ];
     writeFileSync(path.join(tmpDir, "movies.ndjson"), withMissing.map((m) => JSON.stringify(m)).join("\n") + "\n");
+    const missingConfig: BlockDbConfig = {
+      ...config,
+      schema: { ...config.schema, fields: { ...config.schema.fields, year: { kind: "number", absent: true, nullable: true }, rating: { kind: "number", absent: true } } },
+    };
 
-    const { manifest, outputDir } = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const { manifest, outputDir } = build(missingConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 
     const yearZonemap = manifest.zonemap.year as {
       splitPoints: unknown[];
@@ -1717,7 +1747,8 @@ describe("seam #1 — derived fields (ADR-0009)", () => {
   test("a derived number column is an ordinary indexed field, earning the range operators its source cannot have", () => {
     const { manifest } = build(deriveConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 
-    expect(manifest.schema.fields.power_num!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not"]);
+    // `absent: true` (unmappable values leave the key out) adds isAbsent/exists; never null, so no isNull.
+    expect(manifest.schema.fields.power_num!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not", "isAbsent", "exists"]);
     // The source keeps its own semantics — `equals: "*"` still resolves, ranges still (rightly) don't.
     expect(manifest.schema.fields.power!.operators).toEqual(["equals", "in", "startsWith", "not"]);
     expect(manifest.zonemap.power_num).toHaveProperty("pairs");

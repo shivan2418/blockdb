@@ -41,8 +41,18 @@ export interface FieldConfig {
   endsWith?: boolean;
   /** Opt-in trigram index — unlocks `contains` (ADR-0003 §7). Requires `kind: "string"` and `indexed: true`. */
   contains?: boolean;
-  /** Value may be missing from a record (absent ≠ null) — unlocks `isNull`/`isAbsent`/`exists` (T7). Requires `indexed: true`. */
+  /**
+   * The key may be missing from a record (absent ≠ null). Types the field optional (`field?: T`). On
+   * an indexed, single-valued, non-sort field it also unlocks `isAbsent` and `exists`. Inferred by
+   * `init`; `build` fails if a record lacks the key and this isn't set.
+   */
   absent?: boolean;
+  /**
+   * The value may be `null` (null ≠ absent). Types the field `T | null`. On an indexed,
+   * single-valued, non-sort field it also unlocks `isNull` and `exists`. Inferred by `init`; `build`
+   * fails if a record holds `null` and this isn't set.
+   */
+  nullable?: boolean;
   /** Scalar leaf under an object-array — record value is `string[]`, matched existentially via `some` (T7). Requires `kind: "string"` and `indexed: true`. */
   multi?: boolean;
   /**
@@ -84,8 +94,8 @@ export interface FieldConfig {
    * number field with `gt`/`gte`/`lt`/`lte`, while `power` keeps `equals: "*"` working.
    *
    * `using` names one of a closed set of domain-free transforms (see `normalize.ts`). Values a
-   * normalizer cannot map are ABSENT on the derived field rather than guessed at, so declare
-   * `absent: true` whenever the source has any.
+   * normalizer cannot map are ABSENT on the derived field rather than guessed at (never `null`), so
+   * declare `absent: true` whenever the source has any.
    */
   derive?: {
     /** The field to read. Must be declared in `schema.fields`, and must not itself be derived. */
@@ -169,8 +179,10 @@ export interface FieldSchemaEntry {
   isDate: boolean;
   indexed: boolean;
   operators: readonly string[];
-  /** Present (`true`) only for fields opted into presence semantics (T7) — omitted otherwise, mirroring the runtime's optional `FieldMeta.absent`. */
+  /** Present (`true`) when the key may be missing from a record — omitted otherwise, mirroring the runtime's optional `FieldMeta.absent`. */
   absent?: true;
+  /** Present (`true`) when the value may be `null` — omitted otherwise, mirroring the runtime's optional `FieldMeta.nullable`. */
+  nullable?: true;
   /** Present (`true`) only for multi-valued (object-array scalar-leaf) fields (T7) — omitted otherwise, mirroring the runtime's optional `FieldMeta.multi`. */
   multi?: true;
   /** Present (`true`) only for the user PK field (T8) — omitted otherwise, mirroring the runtime's optional `FieldMeta.pk`. */

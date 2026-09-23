@@ -32,6 +32,22 @@ const SECONDARY_BOOLEAN_OPERATORS = ["equals"] as const;
 /** `not` needs no index structure of its own — it's a filter-only rider valid alongside any pruning op (T7/ADR-0004). */
 const RIDER_OPERATOR = "not";
 
+/**
+ * `isNull`/`isAbsent`/`exists`, each offered only when the data can actually be that way: `isNull`
+ * for a nullable field, `isAbsent` for one whose key can be missing, `exists` for either. None of
+ * them needs an index structure — they filter records the other operators selected. Not offered on
+ * the sort field or on list fields, whose missing values have their own rules (ADR-0002 §9,
+ * ADR-0010).
+ */
+function missingValueOperators(field: FieldConfig): string[] {
+  if (field.multi) return [];
+  const ops: string[] = [];
+  if (field.nullable) ops.push("isNull");
+  if (field.absent) ops.push("isAbsent");
+  if (field.nullable || field.absent) ops.push("exists");
+  return ops;
+}
+
 function operatorsForField(field: FieldConfig, isSortField: boolean, indexed: boolean): readonly string[] {
   if (isSortField) {
     // A string sort field gets `startsWith` free on top of the range set: its values are sorted, so
@@ -45,11 +61,11 @@ function operatorsForField(field: FieldConfig, isSortField: boolean, indexed: bo
     const ops: string[] = [...SECONDARY_STRING_OPERATORS];
     if (field.endsWith) ops.push("endsWith");
     if (field.contains) ops.push("contains");
-    ops.push(RIDER_OPERATOR);
+    ops.push(RIDER_OPERATOR, ...missingValueOperators(field));
     return ops;
   }
-  if (field.kind === "boolean") return [...SECONDARY_BOOLEAN_OPERATORS, RIDER_OPERATOR];
-  return [...SECONDARY_RANGE_KIND_OPERATORS, RIDER_OPERATOR];
+  if (field.kind === "boolean") return [...SECONDARY_BOOLEAN_OPERATORS, RIDER_OPERATOR, ...missingValueOperators(field)];
+  return [...SECONDARY_RANGE_KIND_OPERATORS, RIDER_OPERATOR, ...missingValueOperators(field)];
 }
 
 /** N+1 monotonic boundaries: splitPoints[i] = min value of block i; the final entry is the last block's max. */
@@ -98,6 +114,7 @@ function buildSchemaDescriptor(config: ResolvedConfig): SchemaDescriptor {
       indexed,
       operators: operatorsForField(field, isSortField, indexed),
       ...(field.absent === true ? { absent: true as const } : {}),
+      ...(field.nullable === true ? { nullable: true as const } : {}),
       ...(field.multi === true ? { multi: true as const } : {}),
       ...(name === config.pk ? { pk: true as const } : {}),
       ...(field.values !== undefined ? { values: field.values } : {}),

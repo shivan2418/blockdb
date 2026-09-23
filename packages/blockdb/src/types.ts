@@ -34,8 +34,10 @@ export interface FieldMeta {
   readonly multi?: boolean;
   /** This field is the user PK. */
   readonly pk?: boolean;
-  /** Value can be missing → is null / is absent / exists surface. */
+  /** The key may be missing from a record. Informational: `isAbsent`/`exists` arrive via `operators`. */
   readonly absent?: boolean;
+  /** The value may be `null`. Informational: `isNull`/`exists` arrive via `operators`. */
+  readonly nullable?: boolean;
   /**
    * The field's observed value set, baked in by codegen for low-cardinality string fields (an
    * "enum-like" field: MTG colours, a rarity, a status). Narrows the *equality-shaped* operators so
@@ -106,7 +108,12 @@ type PickOps<All, Ops extends string> = {
   [K in Extract<keyof All, Ops>]?: All[K];
 };
 
-type AbsentOps<F> = F extends { absent: true } ? { isNull?: true; isAbsent?: true; exists?: boolean } : {};
+/** The missing-value operators, offered per field through its `operators` like any other. */
+type MissingValueOps = {
+  isNull: true;
+  isAbsent: true;
+  exists: boolean;
+};
 
 /**
  * A field's baked value union, or `string` when codegen didn't bake one (high-cardinality field, or
@@ -132,13 +139,13 @@ type ListOps<F extends FieldMeta> = {
 type FilterFor<F extends FieldMeta> = F extends { kind: "string"; multi: true }
   ? ListOps<F>
   : F extends { kind: "string" }
-    ? PickOps<AllStringOps<ValuesOf<F>>, F["operators"][number]> & AbsentOps<F>
+    ? PickOps<AllStringOps<ValuesOf<F>> & MissingValueOps, F["operators"][number]>
     : F extends { kind: "number" }
-      ? PickOps<AllNumberOps, F["operators"][number]> & AbsentOps<F>
+      ? PickOps<AllNumberOps & MissingValueOps, F["operators"][number]>
       : F extends { kind: "date" }
-        ? PickOps<AllDateOps, F["operators"][number]> & AbsentOps<F>
+        ? PickOps<AllDateOps & MissingValueOps, F["operators"][number]>
         : F extends { kind: "boolean" }
-          ? PickOps<AllBoolOps, F["operators"][number]> & AbsentOps<F>
+          ? PickOps<AllBoolOps & MissingValueOps, F["operators"][number]>
           : never;
 
 /** The where type: ONLY indexed fields, each with ONLY its valid operators. */

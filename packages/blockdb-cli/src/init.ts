@@ -178,7 +178,7 @@ function duplicateValueUnionHints(fields: Record<string, FieldConfig>): string[]
 }
 
 /** Flags that only mean something on a queryable field; `config.ts` rejects all of them on a `json` field. */
-const QUERY_FLAGS = ["indexed", "endsWith", "contains", "multi", "absent"] as const;
+const QUERY_FLAGS = ["indexed", "endsWith", "contains", "multi"] as const;
 
 /**
  * Strips query flags that landed on a payload-only `json` field, reporting each one.
@@ -284,9 +284,10 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
       // Only a queryable field's values are worth baking — that's what the union narrows.
       if (isIndexed && f.values) cfg.values = f.values;
       if (f.multi) cfg.multi = true;
-      // A multi field can't also be `absent`: T7 has no presence semantics over a string[]'s
-      // elements, and config validation rejects the combination (config.ts).
-      if (f.absent && isIndexed && !f.multi) cfg.absent = true;
+      // Facts about the data, recorded on every field so the generated record type tells the truth.
+      // Which missing-value operators they unlock is decided later, from the field's role.
+      if (f.absent) cfg.absent = true;
+      if (f.nullable) cfg.nullable = true;
       // `tsType`/`tsImport` are the one part of a field config inference can never produce — the user
       // hand-writes them. `--reinfer` re-reads the DATA's shape, so carry them over rather than
       // silently discarding work. Dropped if the field stopped being a payload field, since a scalar

@@ -87,7 +87,9 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
       // A configured `tsType` replaces the opaque `unknown` a payload field would otherwise get. It
       // is never validated against the data — the config asserts it, blockdb just relays it.
       const base = field.tsType ?? tsTypeForKind(field.kind);
-      const tsType = field.multi ? `${base}[]` : base;
+      const listOrScalar = field.multi ? `${base}[]` : base;
+      // `unknown` already includes null, so only a concrete type needs `| null` spelled out.
+      const tsType = field.nullable && listOrScalar !== "unknown" ? `${listOrScalar} | null` : listOrScalar;
       // Payload-only "json" fields are opaque and their presence isn't tracked — always optional,
       // declared type or not: blockdb can't promise a key exists when it never checked.
       const optional = field.absent || field.kind === "json" ? "?" : "";
@@ -101,10 +103,11 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
       const operators = field.operators.map((op) => `"${op}"`).join(", ");
       const multi = field.multi ? ", multi: true" : "";
       const absent = field.absent ? ", absent: true" : "";
+      const nullable = field.nullable ? ", nullable: true" : "";
       const pk = field.pk ? ", pk: true" : "";
       // The runtime reads this tuple to narrow equals/in/some to the field's value union.
       const values = field.values ? `, values: [${field.values.map((v) => JSON.stringify(v)).join(", ")}]` : "";
-      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${pk}${values} },`;
+      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${nullable}${pk}${values} },`;
     })
     .join("\n");
 

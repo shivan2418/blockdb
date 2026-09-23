@@ -331,26 +331,51 @@ describe("buildManifest", () => {
     expect(manifest.schema.fields.title!.multi).toBeUndefined();
   });
 
-  test("T7: an absent-opted-in field carries absent: true; a non-opted-in field omits the key entirely", () => {
-    const indexedConfig: ResolvedConfig = {
+  test("absent/nullable are recorded on the field, and unlock exactly the missing-value operators the data allows", () => {
+    const missingConfig: ResolvedConfig = {
       ...config,
-      fields: { ...config.fields, title: { kind: "string", indexed: true, absent: true } },
+      fields: {
+        ...config.fields,
+        year: { kind: "number", absent: true, nullable: true },
+        title: { kind: "string", indexed: true, absent: true },
+        subtitle: { kind: "string", indexed: true, nullable: true },
+        rating: { kind: "number", indexed: true, absent: true, nullable: true },
+        tags: { kind: "string", indexed: true, multi: true, absent: true, nullable: true },
+        notes: { kind: "string", nullable: true },
+      },
     };
     const manifest = buildManifest({
-      config: indexedConfig,
+      config: missingConfig,
       blockFiles,
       splitPoints,
       formatVersion: 0,
       generatorVersion: "0.0.0",
     });
-    expect(manifest.schema.fields.title).toEqual({
+    const { fields } = manifest.schema;
+    expect(fields.title).toEqual({
       kind: "string",
       isDate: false,
       indexed: true,
-      operators: ["equals", "in", "startsWith", "not"],
+      operators: ["equals", "in", "startsWith", "not", "isAbsent", "exists"],
       absent: true,
     });
+    expect(fields.subtitle!.operators).toEqual(["equals", "in", "startsWith", "not", "isNull", "exists"]);
+    expect(fields.subtitle!.nullable).toBe(true);
+    expect(fields.rating!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not", "isNull", "isAbsent", "exists"]);
+    // The sort field and list fields record the facts (for the record type) but get no missing-value
+    // operators: their missing values have their own rules (ADR-0002 §9, ADR-0010).
+    expect(fields.year!.operators).not.toContain("isNull");
+    expect(fields.year).toMatchObject({ absent: true, nullable: true });
+    expect(fields.tags!.operators).toEqual(["equals", "in", "startsWith", "not"]);
+    expect(fields.tags).toMatchObject({ absent: true, nullable: true });
+    // A non-indexed field has no operators at all, but still records that it can be null.
+    expect(fields.notes).toMatchObject({ indexed: false, operators: [], nullable: true });
+  });
+
+  test("a field with neither flag omits both keys entirely", () => {
+    const manifest = buildManifest({ config, blockFiles, splitPoints, formatVersion: 0, generatorVersion: "0.0.0" });
     expect(manifest.schema.fields.year!.absent).toBeUndefined();
+    expect(manifest.schema.fields.year!.nullable).toBeUndefined();
   });
 
   test("T8: a declared pk on the sort field carries schema.pk + the field's pk: true, no indexed requirement", () => {
