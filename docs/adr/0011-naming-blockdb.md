@@ -31,4 +31,4 @@ Nothing had been published to npm, so renaming cost nothing outside this repo an
 ## Consequences
 
 - Earlier ADRs still say "shard". Read it as "block".
-- The rename is breaking for every consumer, which is currently only the shard-test demo, renamed to `blockdb-scryfall`.
+- The rename is breaking for every consumer, which is currently only the shard-test demo, renamed to `blockdb-demo-scryfall`.

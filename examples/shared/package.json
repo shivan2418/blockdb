@@ -5,6 +5,6 @@
   "type": "module",
   "description": "Shared build->deploy->query-in-a-browser test harness for the blockdb examples.",
   "dependencies": {
-    "playwright": "latest"
+    "playwright": "^1.61.0"
   }
 }

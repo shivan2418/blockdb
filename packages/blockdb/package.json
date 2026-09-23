@@ -20,7 +20,7 @@
     "no-backend"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "sideEffects": false,
   "files": [
@@ -41,7 +41,7 @@
   "homepage": "https://github.com/shivan2418/blockdb#readme",
   "bugs": "https://github.com/shivan2418/blockdb/issues",
   "devDependencies": {
-    "@types/node": "latest",
+    "@types/node": "^20.19.0",
     "blockdb-cli": "workspace:*"
   },
   "scripts": {

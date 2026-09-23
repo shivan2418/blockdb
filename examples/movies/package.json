@@ -18,10 +18,10 @@
   },
   "devDependencies": {
     "blockdb-cli": "workspace:*",
-    "@types/node": "latest",
-    "typescript": "latest",
-    "vite": "latest",
-    "vitest": "latest",
-    "playwright": "latest"
+    "@types/node": "^20.19.0",
+    "typescript": "^7.0.0",
+    "vite": "^8.1.0",
+    "vitest": "^4.1.0",
+    "playwright": "^1.61.0"
   }
 }

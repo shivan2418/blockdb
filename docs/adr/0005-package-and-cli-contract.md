@@ -85,7 +85,7 @@ Framework-agnostic (pure `fetch`); browser + SSR/Node ≥18 (global `fetch`, inj
 **CLI:** `init`/`build`/`inspect` implemented; **flag-equivalence** honored (`--yes` fully non-interactive); drift fails loud; clean-on-build + `--no-clean`; `config.schema.json` published + `$schema`-referenced; config round-trips; generated files stamped.
 **End-to-end (hard acceptance test):** **1–2 shipped example pages** built on static-shard (in `examples/`, e.g. the movie-catalog browser + one more shape) that **build → deploy → query in a browser** — living documentation *and* the proof the whole contract works. Deploy-guidance doc (map fog) at least stubbed or explicitly deferred.
 **Comment hygiene:** no prototype/teaching/throwaway comments in shipped code; comments explain non-obvious intent only; **generated files carry only the version-stamp + `do not edit` header**.
-**CI/release:** CI typechecks + tests both packages + the pack-size check; lockstep release tooling (changesets fixed-mode or a version script); `engines.node >=18`.
+**CI/release:** CI typechecks + tests both packages + the pack-size check; lockstep release tooling (changesets fixed-mode or a version script); `engines.node >=18`. *(Amended 2026-09-22: the published packages declare `>=20`, the lowest Node that CI tests and vitest 4 runs on; Node 18 is EOL. The monorepo root declares `^20.19.0 || >=22.12.0` for vite 8. Dev dependencies use caret ranges on their current major instead of `latest`, and `@types/node` tracks the floor (`^20`) so newer Node APIs fail typecheck. CI runs on Node 20 and 24; `.nvmrc` pins development to 24 and `packageManager` pins pnpm.)*
 
 ## Consequences
 
