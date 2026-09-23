@@ -15,6 +15,7 @@ import {
 import { fetchBlockRecords } from "./block-fetch.js";
 import {
   assertWhereHasPruning,
+  compactWhere,
   type ClientOptions,
   type CollectionMeta,
   type CountResult,
@@ -652,6 +653,7 @@ export function createClient<S extends SchemaMeta, Records>(
     const collection: Record<string, unknown> = {
       findMany: async (args?: RawFindManyArgs) => {
         assertLimitWithinCeiling(args?.limit, maxResults);
+        if (args?.where !== undefined) args = { ...args, where: compactWhere(args.where) };
         return withManifest(args?.signal, (manifest, ctx) => {
           // After the manifest (which says what prunes on this dataset), before any index or block fetch.
           assertWhereHasPruning(args?.where, manifest.schema);
@@ -659,7 +661,7 @@ export function createClient<S extends SchemaMeta, Records>(
         });
       },
       count: async (where?: Record<string, Record<string, unknown>>, opts?: { signal?: AbortSignal }) =>
-        withManifest(opts?.signal, (manifest, ctx) => executeCount(manifest, ctx, where)),
+        withManifest(opts?.signal, (manifest, ctx) => executeCount(manifest, ctx, compactWhere(where))),
       getSchema: () => meta,
     };
 

@@ -247,6 +247,43 @@ function filterOpPrunes(op: string, value: unknown, pruning: readonly string[]):
   return !(op === "contains" && typeof value === "string" && value.length < 3);
 }
 
+/**
+ * `where` with every `undefined` left out: a filter set to `undefined`, an operator whose value is
+ * `undefined`, and a filter (or a list field's element filter) left empty by that. `undefined` means
+ * "no filter here", so `{ set: chosen ? { equals: chosen } : undefined }` and `{ year: { gte: from } }`
+ * with no `from` both drop out, the way they read. `findMany`, `count` and `wherePrunes` all see the
+ * compacted form, so the rider check and the query agree on what the `where` says.
+ */
+export function compactWhere(
+  where: Record<string, Record<string, unknown> | undefined> | undefined,
+): Record<string, Record<string, unknown>> | undefined {
+  if (where === undefined) return undefined;
+  const compactFilter = (filter: Record<string, unknown>, nested: boolean): Record<string, unknown> | undefined => {
+    const out: Record<string, unknown> = {};
+    for (const [op, value] of Object.entries(filter)) {
+      if (value === undefined) continue;
+      if (!nested && (op === "some" || op === "every") && isPlainObject(value)) {
+        const element = compactFilter(value, true);
+        if (element !== undefined) out[op] = element;
+        continue;
+      }
+      out[op] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  };
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [field, filter] of Object.entries(where)) {
+    if (filter === undefined) continue;
+    const compacted = isPlainObject(filter) ? compactFilter(filter, false) : filter;
+    if (compacted !== undefined) out[field] = compacted;
+  }
+  return out;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Date);
+}
+
 /** The fields a pruning check reads: each field's operators and, when codegen emitted it, its `pruning` list. */
 type PruningSchema = { fields: Record<string, { operators: readonly string[]; pruning?: readonly string[]; multi?: true | boolean }> };
 
@@ -260,8 +297,7 @@ type PruningSchema = { fields: Record<string, { operators: readonly string[]; pr
  * needle has no trigram to look up, so it rides even on a field opted into `contains`.
  */
 export function wherePrunes(where: Record<string, Record<string, unknown> | undefined> | undefined, schema: PruningSchema): boolean {
-  if (!where) return true;
-  const entries = Object.entries(where).filter(([, filter]) => filter !== undefined);
+  const entries = Object.entries(compactWhere(where) ?? {});
   if (entries.length === 0) return true;
 
   return entries.some(([field, filter]) => {
