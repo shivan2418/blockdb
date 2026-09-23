@@ -140,6 +140,8 @@ const { records } = wherePrunes(where, db.books.getSchema())
     await db.books.findMany({ where: { ...where, title: { startsWith: userInput } }, limit: 20 });
 ```
 
+`wherePrunes` answers "would `findMany` accept this?", not "does this narrow the read?". An empty or missing `where` returns `true`, because an unfiltered `findMany` is allowed: with a `limit` and no `orderBy` other than the sort field, it reads blocks in sort order and stops once the page is full. Without a `limit`, or ordered by another field, it reads every block. So if your UI can clear every filter, check for the empty case yourself before deciding whether to add a range.
+
 **When to index a field.** Index it when a filter on it should narrow the read by itself. Leave it unindexed when it's only ever combined with a more selective filter, or when its values are spread across every file anyway: a boolean, or a house number in an address list sorted by street. `blockdb build` warns about an index whose average value appears in most files, because that index costs build output and saves nothing.
 
 ## Which operators a field gets
