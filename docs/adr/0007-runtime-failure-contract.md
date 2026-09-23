@@ -40,7 +40,7 @@ Every failure maps to exactly one code — as fine-grained as the caller's *reac
 |---|---|---|
 | `CONFIG` | `manifest.json` itself 404s / unreachable — wrong `basePath` | no |
 | `FORMAT_VERSION` | manifest major ≠ runtime major (ADR-0005) | no |
-| `DEPLOY_INTEGRITY` | a manifest-*referenced* content-hashed shard/chunk/sidecar 404s / is missing *(Amended 2026-09-23, #32: and a refetched manifest still names it; see §2)* | no |
+| `DEPLOY_INTEGRITY` | a manifest-*referenced* content-hashed shard/chunk/sidecar 404s / is missing *(Amended 2026-09-23, #32: and a refetched manifest still names it; see §2. Self-review: a 2xx `text/html` answer, a single-page-app fallback, counts as missing, and on the manifest itself as `CONFIG`)* | no |
 | `NETWORK` | `fetch` rejected, **or** resolved non-ok non-404 (500/403/429/…); optional `.status` | maybe |
 | `CORRUPT_DATA` | fetch resolved 2xx but the body won't parse / decompress (bad JSON·NDJSON·encoding) | no |
 | `LIMIT_EXCEEDED` | the `maxResults` ceiling (ADR-0004) | no |

@@ -177,6 +177,29 @@ describe("stale cached manifest after a redeploy (#32)", () => {
     expect(manifestRequests(seen).map((s) => s.cache)).toEqual(["reload"]);
   });
 
+  test("a single-page-app host (200 + index.html for a missing file) gets the same recovery", async () => {
+    const seen: Seen[] = [];
+    const inner = hostFetch(seen, oldDeploy);
+    const html = { ok: true, status: 200, headers: new Headers({ "content-type": "text/html; charset=utf-8" }), text: async () => "<!doctype html>" };
+    const spaFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await inner(input, init);
+      return response.status === 404 ? ({ ...html, json: async () => JSON.parse("<") } as unknown as Response) : response;
+    }) as typeof fetch;
+    const client = createClient<typeof schema, Records>(schema, { basePath: "/data", fetch: spaFetch });
+    const { records } = await client.movies.findMany({ where: { title: { equals: "Gladiator" } } });
+    expect(records.map((r) => r.title)).toEqual(["Gladiator"]);
+    expect(manifestRequests(seen).map((s) => s.cache)).toEqual(["no-cache", "reload"]);
+
+    const stuck = createClient<typeof schema, Records>(schema, {
+      basePath: "/data",
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) =>
+        String(input).endsWith("manifest.json") ? spaFetch(input, init) : ({ ...html } as unknown as Response)) as typeof fetch,
+    });
+    const error = await caught(stuck.movies.findMany({ where: { title: { equals: "Gladiator" } } }));
+    expect(error.code).toBe("DEPLOY_INTEGRITY");
+    expect(error.message).toMatch(/HTML page/);
+  });
+
   test("a first manifest fetch that fails isn't cached: the next query fetches it again", async () => {
     let failNext = true;
     const inner = hostFetch([], newDeploy);

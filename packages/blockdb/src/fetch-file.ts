@@ -20,6 +20,12 @@ function messageFor404(kind: FetchedFileKind, url: string): string {
     : `blockdb: "${url}" referenced by the manifest returned HTTP 404 — the deploy is incomplete or corrupt, or a stale cache (a CDN, a fetch wrapper, or an old index.html / bundled client) is still serving an earlier deploy's manifest. If the deploy is complete, wait for caches to expire or hard-reload; otherwise re-run \`blockdb build\` and redeploy the whole output.`;
 }
 
+function messageForHtmlFallback(kind: FetchedFileKind, url: string): string {
+  return kind === "manifest"
+    ? `blockdb: "${url}" returned an HTML page instead of manifest.json, which is what a single-page-app fallback serves for a missing file — check basePath: it must point at the deployed dataset root.`
+    : `blockdb: "${url}" referenced by the manifest returned an HTML page, which is what a single-page-app fallback serves for a missing file — the deploy is incomplete, or a stale cache is still serving an earlier deploy's manifest. If the deploy is complete, wait for caches to expire or hard-reload; otherwise re-run \`blockdb build\` and redeploy the whole output.`;
+}
+
 /**
  * Fetches `url`, mapping rejection / !ok to the right BlockDbError code. Resolves only on 2xx.
  * `cache` is set only for the manifest (#32); content-hashed files leave it off so the browser's
@@ -43,13 +49,17 @@ async function fetchOk(
       cause,
     });
   }
-  if (response.ok) return response;
-  if (response.status === 404) {
+  // A single-page-app fallback (Netlify/Vercel/Cloudflare rewrites, `serve -s`) answers a missing file
+  // with 200 and index.html. blockdb never serves HTML, so that is the missing file, and it is routed as
+  // the 404 it stands for. Otherwise it would surface as CORRUPT_DATA and skip the stale-manifest recovery.
+  const servedHtml = response.ok && (response.headers?.get("content-type") ?? "").toLowerCase().startsWith("text/html");
+  if (response.ok && !servedHtml) return response;
+  if (response.status === 404 || servedHtml) {
     throw new BlockDbError({
       code: kind === "manifest" ? "CONFIG" : "DEPLOY_INTEGRITY",
       url,
-      status: 404,
-      message: messageFor404(kind, url),
+      status: response.status,
+      message: servedHtml ? messageForHtmlFallback(kind, url) : messageFor404(kind, url),
     });
   }
   throw new BlockDbError({

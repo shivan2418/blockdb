@@ -110,7 +110,9 @@ construction (a retry can't fix a wrong `basePath` or a version mismatch).
 
 ## Recovering from `DEPLOY_INTEGRITY`
 
-`DEPLOY_INTEGRITY` means the manifest referenced a block/chunk/sidecar that 404s, and a manifest
+`DEPLOY_INTEGRITY` means the manifest referenced a block/chunk/sidecar that 404s (or that a
+single-page-app fallback answered with `index.html`: blockdb never serves HTML, so an HTML response is
+treated as the missing file it stands for), and a manifest
 refetched with `cache: "reload"` still names it — almost always an
 incomplete or half-propagated deploy (a CDN edge that hasn't caught up, or a deploy that uploaded
 `manifest.json` before the files it points to finished uploading). Recovery is: re-run
