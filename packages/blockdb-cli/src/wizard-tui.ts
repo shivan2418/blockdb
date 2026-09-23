@@ -1,8 +1,8 @@
 import readline from "node:readline";
 import path from "node:path";
 import { init, resolveInitConfig, sampleLimit, scanInput, type InitOptions, type InitResult } from "./init.js";
-import { countInputRecords, type PopulationStats } from "./input.js";
-import type { ProgressReporter } from "./progress.js";
+import { countInputRecords, type InputReadOptions, type PopulationStats } from "./input.js";
+import type { OnProgress, ProgressReporter } from "./progress.js";
 import {
   applyKey,
   createInitialState,
@@ -108,6 +108,35 @@ function toInitOptions(opts: InteractiveInitOptions, choices: WizardChoices): In
 }
 
 /**
+ * Everything the wizard needs before its first frame, from the same streaming pass `init --yes` makes
+ * (including `sampleLimit`), so the wizard reads exactly the records `init` would and can't drift from
+ * what it would have written. Exported for tests.
+ */
+export function loadWizardData(
+  resolvedInput: string,
+  readOpts: InputReadOptions,
+  limit: number | undefined,
+  onProgress?: OnProgress,
+): WizardData {
+  // A sampled read counts the true totals first (NDJSON streamed, no parse), so the review screen and
+  // size estimates reflect the full input, and so does the recommendation's judgement of which indexes
+  // prune. A full read measures the dataset on the way.
+  const counted: PopulationStats | undefined =
+    limit === undefined ? undefined : countInputRecords(resolvedInput, { ...readOpts, ...(onProgress ? { onProgress } : {}) });
+  const scan = scanInput(
+    resolvedInput,
+    { ...readOpts, limit, ...(onProgress ? { onProgress } : {}) },
+    { estimateSample: ESTIMATE_SAMPLE_MAX, measureBytes: limit === undefined, ...(counted ? { population: counted } : {}) },
+  );
+  const population: PopulationStats = counted ?? scan.population;
+  const draft: WizardData = wizardDataFrom(scan.inferred, scan.sample, population, scan.pruneSample);
+  // The scan judged the default indexes at the default block size; the wizard starts from its own
+  // recommended size, so judge them again at that one, or it would pre-tick a field and then flag it.
+  const startBlockBytes = createInitialState(draft).blockBytes;
+  return { ...draft, recommendedIndexed: scan.recommendFor({ blockBytes: startBlockBytes }).indexedFields };
+}
+
+/**
  * The interactive `init` wizard (T12/ADR-0006): a thin terminal driver over `wizard.ts`'s pure state
  * machine. On persist it calls the exact same `init()` core the non-interactive `--yes` path uses —
  * flag-equivalence (ADR-0006 §1) isn't asserted after the fact, it's structural: there is no second
@@ -130,21 +159,7 @@ export function runInteractiveInit(opts: InteractiveInitOptions): Promise<InitRe
   // All the loading below happens BEFORE the wizard paints its first frame, so it's the one stretch
   // where the user stares at a blank terminal. Report it, then hand the screen over.
   const progress = opts.progress;
-  // One streaming pass, shared with `init` so the wizard reads exactly the records `init --yes` would
-  // (including `sampleLimit`) and can't drift from what it would have written.
-  const limit = sampleLimit(opts);
-  const scan = scanInput(
-    resolvedInput,
-    { ...readOpts, limit, ...(progress ? { onProgress: progress.report } : {}) },
-    { estimateSample: ESTIMATE_SAMPLE_MAX, measureBytes: limit === undefined },
-  );
-  // A full read measured the dataset on the way; a sampled one counts the true totals cheaply (NDJSON
-  // streamed, no parse) so the review screen and size estimates reflect the full input.
-  const population: PopulationStats =
-    limit === undefined
-      ? scan.population
-      : countInputRecords(resolvedInput, { ...readOpts, ...(progress ? { onProgress: progress.report } : {}) });
-  const data: WizardData = wizardDataFrom(scan.inferred, scan.sample, population);
+  const data = loadWizardData(resolvedInput, readOpts, sampleLimit(opts), progress?.report);
   // Loading done — clear the bar before the TUI takes over the screen.
   progress?.finish();
 

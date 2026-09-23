@@ -93,6 +93,11 @@ export interface WizardData {
   records: Record<string, unknown>[];
   /** True whole-dataset totals so size/block estimates reflect the full input even when `records` is a sample. */
   population: PopulationStats;
+  /**
+   * The sample `init`'s index recommendation judged pruning from (`scanInput`'s `pruneSample`), so the
+   * live "barely prunes" marks agree with the recommendation. Falls back to `records`.
+   */
+  pruneRecords?: Record<string, unknown>[];
 }
 
 /**
@@ -106,6 +111,7 @@ export function wizardDataFrom(
   inferred: InferenceResult,
   estimateRecords: Record<string, unknown>[],
   population: PopulationStats,
+  pruneRecords?: Record<string, unknown>[],
 ): WizardData {
   const fields: WizardField[] = Object.entries(inferred.fields)
     .map(([name, f]) => ({ name, kind: f.kind, cardinality: f.cardinality, absent: f.absent, multi: f.multi, shape: f.shape }))
@@ -120,6 +126,7 @@ export function wizardDataFrom(
     sortCandidates: fields.filter(isSortFieldCandidate).map((f) => f.name),
     records: estimateRecords,
     population,
+    ...(pruneRecords !== undefined ? { pruneRecords } : {}),
   };
 }
 
@@ -676,7 +683,7 @@ function blockSharesFor(data: WizardData, sortField: string, blockCount: number)
   if (cached !== undefined) return cached;
 
   const sortKind = data.fields.find((f) => f.name === sortField)?.kind as SortKind;
-  const estimator = new BlockShareEstimator(data.records, sortField, sortKind, data.recordCount, blockCount);
+  const estimator = new BlockShareEstimator(data.pruneRecords ?? data.records, sortField, sortKind, data.recordCount, blockCount);
   const out: Record<string, number> = {};
   for (const f of data.fields) {
     if (f.name === sortField || f.kind === "json") continue;
