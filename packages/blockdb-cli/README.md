@@ -24,6 +24,8 @@ Every wizard choice is also a CLI flag (nothing wizard-only), so `init --yes` wi
 
 `build` fails with a schema-drift error when the data no longer matches the config: a new `null`, a missing key, a value of the wrong kind. The error lists every affected field at once. `init --reinfer` re-reads the data and refreshes only what `init` learned from it: field kinds, `absent`/`nullable`, list fields, value sets, and fields added to or removed from the data. It keeps every choice you made: the sort field, the primary key, which fields are indexed, `endsWith`/`contains`, compression, block sizes, derived fields and `tsType`. New fields get the same defaults a first run gives them, and flags override everything.
 
+`--indexed`, `--ends-with` and `--contains` each take a comma-separated list, and each list is the complete set for that flag, not an addition to what the config already has. So `--contains title` turns `contains` off on every other field, and a field left out of `--indexed` also loses its `endsWith`/`contains`, which need an index.
+
 ### Inference reads everything by default
 
 `init` decides the baked schema, and a schema that is wrong about your data is the expensive kind of wrong: a value union missing a value that first appears at row 40,000, a field absent from the first 1000 rows, a cardinality that misprices an index or picks the wrong sort field. So `init` reads the whole input. It streams, like `build`: it keeps counts per field rather than the records, so its memory stays flat however large the input. Distinct values are counted exactly up to a million per field and estimated (±~1%) past that.

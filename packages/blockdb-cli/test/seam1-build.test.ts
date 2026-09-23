@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { build } from "../src/build.js";
 import { loadConfigFile } from "../src/config.js";
 import { contentHash } from "../src/hash.js";
-import { init } from "../src/init.js";
+import { init, resolveInitConfig } from "../src/init.js";
 import type { BlockDbConfig } from "../src/types.js";
 import { getFormatVersion } from "../src/version.js";
 
@@ -1507,6 +1507,39 @@ describe("seam #1 — init --yes → build (T10)", () => {
 
     const { config } = init({ cwd: tmpDir, configPath, yes: true, fullScan: true, reinfer: true });
     expect(config.schema.fields[enumField]!.values).toBeUndefined();
+  });
+
+  test("a kept text opt-in can be turned off: by un-indexing the field, or by leaving it out of --contains", () => {
+    writeProducts(tmpDir);
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    const withContains: BlockDbConfig = {
+      collection: "products",
+      input: { path: "products.ndjson" },
+      schema: {
+        sortField: "name",
+        fields: {
+          id: { kind: "string", indexed: true },
+          name: { kind: "string" },
+          category: { kind: "string", indexed: true, contains: true, endsWith: true },
+          price: { kind: "number" },
+        },
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(withContains, null, 2));
+
+    // Un-indexing takes the opt-ins with it, rather than failing on "contains but not indexed".
+    for (const reinfer of [true, false]) {
+      const { config } = resolveInitConfig({ cwd: tmpDir, configPath, yes: true, reinfer, indexedFields: ["id"] });
+      expect(config.schema.fields.category).not.toHaveProperty("indexed");
+      expect(config.schema.fields.category).not.toHaveProperty("contains");
+      expect(config.schema.fields.category).not.toHaveProperty("endsWith");
+    }
+
+    // --contains is the complete set, like --indexed: the wizard passes [] when nothing is ticked.
+    const { config } = resolveInitConfig({ cwd: tmpDir, configPath, yes: true, reinfer: true, indexedFields: ["id", "category"], containsFields: [] });
+    expect(config.schema.fields.category!.indexed).toBe(true);
+    expect(config.schema.fields.category).not.toHaveProperty("contains");
+    expect(config.schema.fields.category!.endsWith).toBe(true);
   });
 
   test("re-running init without --reinfer keeps compression", () => {

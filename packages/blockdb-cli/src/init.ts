@@ -179,9 +179,9 @@ export interface InitOptions {
   pk?: string;
   /** Explicit opt-in indexed-field set, overriding the inferred/existing recommendation. */
   indexedFields?: string[];
-  /** Fields to opt into the reversed-value index (ADR-0003 §7) — forces them indexed too. */
+  /** The complete set of fields with the reversed-value index (ADR-0003 §7) — forces them indexed too. */
   endsWithFields?: string[];
-  /** Fields to opt into the trigram index (ADR-0003 §7) — forces them indexed too. */
+  /** The complete set of fields with the trigram index (ADR-0003 §7) — forces them indexed too. */
   containsFields?: string[];
   output?: string;
   clientOut?: string;
@@ -200,9 +200,9 @@ type FieldFlagOverrides = Pick<InitOptions, "indexedFields" | "endsWithFields" |
 /**
  * Layers `--indexed`/`--ends-with`/`--contains` on top of a fields record — used identically
  * whether `fields` just came from inference or is being reused from an existing config, so the
- * flag-equivalence contract (ADR-0005 §3) is honored the same way either way. `--indexed`, when
- * passed, is the *complete* indexed set (flags > file precedence) rather than merged with
- * whatever was already indexed. Multi-valued fields and a non-sort-field pk are always forced
+ * flag-equivalence contract (ADR-0005 §3) is honored the same way either way. Each flag, when
+ * passed, is the *complete* set for what it controls (flags > file precedence) rather than merged
+ * with what the config already had. Multi-valued fields and a non-sort-field pk are always forced
  * indexed regardless — omitting them isn't a real choice, it produces a structurally broken config.
  */
 function applyFieldFlagOverrides(
@@ -226,10 +226,13 @@ function applyFieldFlagOverrides(
     }
   }
 
+  // Each flag, when passed, is the complete set for its opt-in, like `--indexed`: a field it leaves out
+  // loses the opt-in, even one the existing config had. That is the only way to turn one off without
+  // hand-editing (the wizard always passes all three).
   const indexedWanted = overrides.indexedFields ? new Set(overrides.indexedFields) : undefined;
-  const endsWithWanted = new Set(overrides.endsWithFields ?? []);
-  const containsWanted = new Set(overrides.containsFields ?? []);
-  if (!indexedWanted && endsWithWanted.size === 0 && containsWanted.size === 0) return fields;
+  const endsWithWanted = overrides.endsWithFields ? new Set(overrides.endsWithFields) : undefined;
+  const containsWanted = overrides.containsFields ? new Set(overrides.containsFields) : undefined;
+  if (!indexedWanted && !endsWithWanted && !containsWanted) return fields;
 
   const next: Record<string, FieldConfig> = {};
   for (const [name, f] of Object.entries(fields)) {
@@ -240,19 +243,24 @@ function applyFieldFlagOverrides(
     const cfg: FieldConfig = { ...f };
     const mustIndex = cfg.multi === true || name === pk;
 
+    if (endsWithWanted && !endsWithWanted.has(name)) delete cfg.endsWith;
+    if (containsWanted && !containsWanted.has(name)) delete cfg.contains;
     if (indexedWanted) {
       if (indexedWanted.has(name) || mustIndex) cfg.indexed = true;
       else {
         delete cfg.indexed;
-        // A value union only narrows a queryable field, so it goes when the index does.
+        // A value union and the text-index opt-ins only work on an indexed field, so they go with the
+        // index (unless their own flag asks for them below, which indexes the field again).
         delete cfg.values;
+        delete cfg.endsWith;
+        delete cfg.contains;
       }
     }
-    if (endsWithWanted.has(name)) {
+    if (endsWithWanted?.has(name)) {
       cfg.indexed = true;
       cfg.endsWith = true;
     }
-    if (containsWanted.has(name)) {
+    if (containsWanted?.has(name)) {
       cfg.indexed = true;
       cfg.contains = true;
     }
