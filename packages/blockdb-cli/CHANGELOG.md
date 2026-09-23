@@ -1,5 +1,14 @@
 # blockdb-cli
 
+## 0.3.0
+
+### Minor Changes
+
+- 9129d6a: `init` no longer recommends an index that wouldn't prune (#31). It estimates from a 5,000-record sample how many data files each candidate's average value would sit in under the recommended sort field. Above the build's 35% "barely prunes" line, it gives the slot to the next candidate and prints a note saying the field stays filterable as a rider. The wizard's "Fast filters" step marks such fields "barely prunes" and warns if you tick one.
+- fb1e1b6: **Breaking:** every field is now queryable, and an index only decides which filters _prune_ (ADR-0013, #30). A filter that can't narrow which files are read is a **rider**: `not`, `isNull`/`isAbsent`/`exists`, any filter on an unindexed field, and `contains`/`endsWith` without their index opt-in. Riders work alongside at least one filter that prunes. A `findMany` `where` made only of riders is a compile error and throws `BlockDbError` code `NEEDS_PRUNING` at runtime, instead of quietly reading the whole dataset (previously possible with `isNull`/`isAbsent`/`exists`). `orderBy` accepts any queryable field. The manifest gains a per-field `pruning` list, so deploys built with an older blockdb must be rebuilt (the runtime reports `FORMAT_VERSION`). `blockdb build` now warns when a plain index barely prunes, and the wizard's first step asks "Which filters need to be fast?".
+- a4cd1f4: `blockdb build` streams end to end, so its memory no longer grows with the input (#28). Records are read, derived and drift-checked one at a time; the external sort now spills runs by size as well as count and merges them through a heap; each block is written as soon as it closes. Output is byte-identical to before. On real data, peak memory fell from 2.5 GB to 0.75 GB (532 MB input) and from 1.6 GB to 0.54 GB (257 MB input), and builds got faster. A build that fails part-way now leaves the previous output untouched. `inspect --config` streams the same way.
+- 974b4f3: `blockdb init` streams its inference, so reading the whole input no longer means holding it in memory (#29). Each field keeps counts and a bounded distinct counter instead of its values: exact up to a million distinct values, estimated (±~1%) past that. On real data, peak memory fell from 1.47 GB to 0.19 GB (257 MB input) and from 1.33 GB to 0.37 GB (532 MB input), with identical configs. The wizard's live estimates now use a uniform sample of the whole input rather than its first 2,000 records, so a glob read in filename order no longer skews them.
+
 ## 0.2.1
 
 ### Patch Changes
