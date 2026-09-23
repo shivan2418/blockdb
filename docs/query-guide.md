@@ -365,6 +365,39 @@ async function onInput(term: string) {
 
 A cancelled download is lost, so don't cancel by reflex. If the next query needs mostly the same files, which is typical when a prefix grows by one letter on the sort field, letting the old query finish fills the browser cache for the new one. Cancel when the old query's files are no longer the ones you need.
 
+## Running queries in a Web Worker
+
+A query parses every data file it downloads, and a block is often a few megabytes of NDJSON. On the main thread that parse can freeze the page for hundreds of milliseconds, which shows as a stutter when every keystroke runs a query. The runtime has no DOM dependency and works unchanged in a Web Worker, so move queries there when that matters:
+
+```ts
+// search.worker.ts
+import { BlockDbError } from "blockdb";
+import { connect } from "./blockdb/client";
+
+// A relative basePath resolves against the worker script's URL, not the page's: pass an absolute one.
+const db = connect({ basePath: new URL("/blockdb", self.location.origin).href });
+
+let search: AbortController | undefined;
+
+self.onmessage = async (e: MessageEvent<{ term: string }>) => {
+  search?.abort();
+  search = new AbortController();
+  try {
+    const { records } = await db.books.findMany({
+      where: { title: { startsWith: e.data.term } },
+      limit: 10,
+      signal: search.signal,
+    });
+    self.postMessage({ term: e.data.term, records });
+  } catch (err) {
+    if (err instanceof BlockDbError && err.code === "ABORTED") return;
+    self.postMessage({ term: e.data.term, error: String(err) });
+  }
+};
+```
+
+On the page, create it with `new Worker(new URL("./search.worker.ts", import.meta.url), { type: "module" })`, `postMessage({ term })` on input, and render the results that come back. Records cross to the page as structured clones, which is cheap next to parsing. Each worker has its own client, so its manifest is downloaded once per worker, not shared with a client on the page.
+
 ## What a query costs
 
 Every query first loads the manifest (once per client, revalidated with the host via `cache: "no-cache"`). The manifest records each file's value ranges, so the sort field and number/date ranges can rule out files without fetching anything else. Other operators may fetch small index chunks (about 45 KB each) to find which files contain a value. blockdb then fetches the remaining data files.
