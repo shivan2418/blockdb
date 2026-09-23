@@ -610,6 +610,56 @@ void invalid;
     assertConsumerCompiles(clientOutDir, consumerSource);
   });
 
+  test("a string sort field's range operators are usable in the typed where, and secondary strings still reject them", () => {
+    // The manifest has always offered gt/gte/lt/lte on a string sort field; the where type must too,
+    // or the operators the build advertises are unreachable from a typed client.
+    writeFileSync(
+      path.join(tmpDir, "movies.ndjson"),
+      MOVIES.map((m) => JSON.stringify({ ...m, certification: "PG" })).join("\n") + "\n",
+    );
+    const { clientOutDir } = build(
+      {
+        ...config,
+        schema: {
+          sortField: "title",
+          fields: {
+            year: { kind: "number" },
+            title: { kind: "string" },
+            rating: { kind: "number" },
+            certification: { kind: "string", indexed: true },
+          },
+        },
+      },
+      { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 },
+    );
+
+    const consumerSource = `
+import { connect } from "./client.js";
+
+const db = connect();
+
+async function valid() {
+  await db.movies.findMany({ where: { title: { gte: "G", lt: "M" } } });
+  await db.movies.findMany({ where: { title: { gt: "", lte: "Z" } } });
+  await db.movies.findMany({ where: { title: { startsWith: "Gla" } } });
+}
+
+async function invalid() {
+  // a string sort field compares strings, not numbers.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { title: { gte: 5 } } });
+
+  // secondary string fields withhold ranges on purpose (ADR-0003 §7).
+  // @ts-expect-error
+  await db.movies.findMany({ where: { certification: { gte: "P" } } });
+}
+
+void valid;
+void invalid;
+`;
+    assertConsumerCompiles(clientOutDir, consumerSource);
+  });
+
   test("T3: tsc exits 0 for a consumer exercising secondary-field equals/in/startsWith and rejecting disabled operators", () => {
     const { clientOutDir } = build(indexedConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 

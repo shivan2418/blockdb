@@ -71,6 +71,12 @@ type AllStringOps<V extends string = string> = {
   startsWith: string;
   contains: string; // opt-in (trigram index) + prunes
   endsWith: string; // opt-in (reversed index) + prunes
+  // Lexicographic ranges: only a string SORT field is ever granted these (ADR-0003 §7), so PickOps
+  // keeps them off secondary string fields, whose operator lists never include them.
+  gt: string;
+  gte: string;
+  lt: string;
+  lte: string;
 };
 type AllNumberOps = {
   equals: number;
