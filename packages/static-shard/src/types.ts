@@ -30,7 +30,7 @@ export interface FieldMeta {
   readonly kind: FieldKind;
   /** The enabled operator names for this field — data, not implied by `kind` (ADR-0003 §7). */
   readonly operators: readonly string[];
-  /** Multi-valued (string[]) → existential `some`. */
+  /** Multi-valued (string[]) → the list operators `some`/`every`/`hasEvery`/`isEmpty` (ADR-0010). */
   readonly multi?: boolean;
   /** This field is the user PK. */
   readonly pk?: boolean;
@@ -118,8 +118,19 @@ type ValuesOf<F extends FieldMeta> = F extends { values: readonly (infer V exten
 /** `{ some: value }` ≡ `{ some: { equals: value } }` (ADR-0001) — only offered where `equals` is itself enabled. */
 type SomeShorthand<F extends FieldMeta> = "equals" extends F["operators"][number] ? ValuesOf<F> : never;
 
+/** What `some` and `every` apply to each element: the field's own operators, or the equals shorthand. */
+type ElementFilter<F extends FieldMeta> = PickOps<AllStringOps<ValuesOf<F>>, F["operators"][number]> | SomeShorthand<F>;
+
+/** A multi-valued field's list operators (T7 `some`, ADR-0010 the rest). Keys on one field AND together. */
+type ListOps<F extends FieldMeta> = {
+  some?: ElementFilter<F>;
+  every?: ElementFilter<F>;
+  hasEvery?: ValuesOf<F>[];
+  isEmpty?: true;
+};
+
 type FilterFor<F extends FieldMeta> = F extends { kind: "string"; multi: true }
-  ? { some?: PickOps<AllStringOps<ValuesOf<F>>, F["operators"][number]> | SomeShorthand<F> }
+  ? ListOps<F>
   : F extends { kind: "string" }
     ? PickOps<AllStringOps<ValuesOf<F>>, F["operators"][number]> & AbsentOps<F>
     : F extends { kind: "number" }
@@ -179,7 +190,7 @@ export function assertWhereHasPruning(where: Record<string, Record<string, unkno
   if (!hasPruning) {
     throw new Error(
       "static-shard: `not` cannot be the only constraint — " +
-        "add a pruning filter (equals / in / startsWith / contains / endsWith / range / some).",
+        "add a pruning filter (equals / in / startsWith / contains / endsWith / range / some / every / hasEvery / isEmpty).",
     );
   }
 }

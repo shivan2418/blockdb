@@ -239,6 +239,11 @@ export interface IndexDescriptor {
   reversed?: { chunks: IndexChunkDirEntry[] };
   /** Trigram index chunk directory — present iff `contains` opted in (ADR-0003 §7/§9). */
   trigram?: { chunks: IndexChunkDirEntry[] };
+  /**
+   * Multi-valued fields only: ordinals of the shards holding at least one present `[]` — what
+   * `isEmpty` and `every` prune on (ADR-0010 §4/§5). Missing (a pre-ADR-0010 build) means unknown.
+   */
+  emptyShards?: number[];
 }
 
 export interface Manifest {

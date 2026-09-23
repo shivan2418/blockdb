@@ -996,6 +996,102 @@ void invalid;
     assertConsumerCompiles(clientOutDir, consumerSource);
   });
 
+  describe("list operators (ADR-0010)", () => {
+    const listConfig: StaticShardConfig = {
+      ...config,
+      shardBytes: 60,
+      schema: {
+        sortField: "year",
+        fields: {
+          year: { kind: "number" },
+          title: { kind: "string", indexed: true },
+          genres: { kind: "string", indexed: true, multi: true, values: ["Action", "Drama", "Crime"] },
+        },
+      },
+    };
+    const LIST_MOVIES = [
+      { year: 1990, title: "A", genres: [] },
+      { year: 1991, title: "B", genres: ["Action"] },
+      { year: 1992, title: "C", genres: ["Drama"] },
+      { year: 1993, title: "D" },
+      { year: 1994, title: "E", genres: [] },
+      { year: 1995, title: "F", genres: ["Action", "Crime"] },
+    ];
+    const writeListMovies = () =>
+      writeFileSync(path.join(tmpDir, "movies.ndjson"), LIST_MOVIES.map((m) => JSON.stringify(m)).join("\n") + "\n");
+
+    test("the manifest lists, per multi-valued field, exactly the shards holding a present []", () => {
+      writeListMovies();
+      const { manifest, outputDir } = build(listConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+      expect(manifest.shards.length).toBeGreaterThan(2);
+
+      const expected = manifest.shards.flatMap((shard, ordinal) => {
+        const records = readFileSync(path.join(outputDir, "shards", `${shard.hash}.ndjson`), "utf8")
+          .split("\n")
+          .filter((l) => l.length > 0)
+          .map((l) => JSON.parse(l) as { genres?: unknown[] });
+        // A missing key is not an empty list (ADR-0010 §3), so record D must not count.
+        return records.some((r) => Array.isArray(r.genres) && r.genres.length === 0) ? [ordinal] : [];
+      });
+      expect(expected.length).toBeGreaterThan(0);
+      expect(manifest.indexes.genres!.emptyShards).toEqual(expected);
+      // Only multi-valued fields carry it.
+      expect(manifest.indexes.title!.emptyShards).toBeUndefined();
+    });
+
+    test("a multi-valued field with no empty lists still carries emptyShards, as []", () => {
+      writeFileSync(
+        path.join(tmpDir, "movies.ndjson"),
+        LIST_MOVIES.filter((m) => m.genres?.length !== 0).map((m) => JSON.stringify(m)).join("\n") + "\n",
+      );
+      const { manifest } = build(listConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+      // [] means "no shard holds one"; a missing key would mean "unknown" to the runtime.
+      expect(manifest.indexes.genres!.emptyShards).toEqual([]);
+    });
+
+    test("tsc exits 0 for a consumer using hasEvery/every/isEmpty, and rejects their misuse", () => {
+      writeListMovies();
+      const { clientOutDir } = build(listConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+
+      const consumerSource = `
+import { connect } from "./client.js";
+
+const db = connect();
+
+async function valid() {
+  await db.movies.findMany({ where: { genres: { hasEvery: ["Action", "Crime"] } } });
+  await db.movies.findMany({ where: { genres: { every: { in: ["Action", "Drama"] } } } });
+  await db.movies.findMany({ where: { genres: { every: "Action" } } });
+  await db.movies.findMany({ where: { genres: { isEmpty: true } } });
+  // exactly [Action, Crime]: two keys on one field AND together.
+  await db.movies.findMany({ where: { genres: { hasEvery: ["Action", "Crime"], every: { in: ["Action", "Crime"] } } } });
+}
+
+async function invalid() {
+  // list operators belong to multi-valued fields only.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { title: { hasEvery: ["A"] } } });
+  // @ts-expect-error
+  await db.movies.findMany({ where: { title: { isEmpty: true } } });
+
+  // values narrow to the field's baked union, like some's equality operators.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { genres: { hasEvery: ["Western"] } } });
+  // @ts-expect-error
+  await db.movies.findMany({ where: { genres: { every: { in: ["Western"] } } } });
+
+  // isEmpty is true-only; "non-empty" is some over anything.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { genres: { isEmpty: false } } });
+}
+
+void valid;
+void invalid;
+`;
+      assertConsumerCompiles(clientOutDir, consumerSource);
+    });
+  });
+
   test("T8: tsc exits 0 for a consumer exercising get(id) when a pk is declared, and rejecting get on a pk-less collection", () => {
     const pkConfig: StaticShardConfig = {
       ...config,

@@ -28,6 +28,21 @@ const { records, hasMore } = await db.movies.findMany({
 
 `db.<collection>` is a real, named member with go-to-definition and intellisense on both the field and its available operators — the type system only offers operators the built data actually indexed. See [`examples/`](https://github.com/shivan2418/static-shard/tree/master/examples) in the repo for two complete, working example apps (movie catalog, product lookup) that build → deploy → query in a real browser.
 
+## List fields
+
+A multi-valued field (`"multi": true`) takes list operators instead of scalar ones:
+
+```ts
+await db.cards.findMany({ where: { colors: { some: "W" } } });                  // any element is W
+await db.cards.findMany({ where: { colors: { hasEvery: ["W", "U"] } } });       // contains W and U
+await db.cards.findMany({ where: { colors: { every: { in: ["W", "U"] } } } });  // only W/U; [] passes
+await db.cards.findMany({ where: { colors: { isEmpty: true } } });              // []
+// Keys on one field AND together, so exactly [W, U] is:
+await db.cards.findMany({ where: { colors: { hasEvery: ["W", "U"], every: { in: ["W", "U"] } } } });
+```
+
+All of them need a present list: a record with no `colors` key, or `null`, matches none, including `isEmpty`. All of them prune through the index, but `every` is the weakest, since "only W or U" admits many shards. See ADR-0010.
+
 ## Case-insensitive search: fold at build time
 
 `equals`, `in`, `startsWith`, `endsWith` and `contains` all compare **exactly**. The index stores the values it was built from, so on Title Case data `contains: "bolt"` finds nothing while `contains: "Bolt"` works. Folding only the query can't fix that, because the index keys are still `"Bol"`, not `"bol"`.

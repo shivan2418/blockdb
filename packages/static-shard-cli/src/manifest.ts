@@ -128,6 +128,8 @@ export function buildManifest(opts: {
   reversedChunkDirs?: Record<string, IndexChunkDirEntry[]>;
   /** Per field opted into `contains`, its trigram index chunk directory (ADR-0003 §7/§9). */
   trigramChunkDirs?: Record<string, IndexChunkDirEntry[]>;
+  /** Per multi-valued field, the shards holding a present `[]` (ADR-0010 §5). */
+  emptyShards?: Record<string, number[]>;
   formatVersion: number;
   generatorVersion: string;
 }): Manifest {
@@ -140,6 +142,7 @@ export function buildManifest(opts: {
     indexChunkDirs = {},
     reversedChunkDirs = {},
     trigramChunkDirs = {},
+    emptyShards = {},
     formatVersion,
     generatorVersion,
   } = opts;
@@ -162,6 +165,9 @@ export function buildManifest(opts: {
   }
   for (const [field, chunks] of Object.entries(trigramChunkDirs)) {
     indexes[field] = { ...indexDescriptorFor(field), trigram: { chunks } };
+  }
+  for (const [field, ordinals] of Object.entries(emptyShards)) {
+    indexes[field] = { ...indexDescriptorFor(field), emptyShards: ordinals };
   }
 
   return {

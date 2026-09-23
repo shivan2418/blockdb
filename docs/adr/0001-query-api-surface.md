@@ -33,7 +33,7 @@ Rationale:
 - **number:** `equals`, `not`, `in`, `gt`, `gte`, `lt`, `lte`
 - **date** (string + `isDate`, compared as ISO): `equals`, `not`, `in`, `gt`, `gte`, `lt`, `lte`
 - **boolean:** `equals`, `not`
-- **multi-valued** (`string[]`, from object-arrays): `some` — existential match taking the element's operator set. Shorthand `genres: { some: "Sci-Fi" }` ≡ `{ some: { equals: "Sci-Fi" } }`.
+- **multi-valued** (`string[]`, from object-arrays): `some` — existential match taking the element's operator set. Shorthand `genres: { some: "Sci-Fi" }` ≡ `{ some: { equals: "Sci-Fi" } }`. *(Refined by ADR-0010: `hasEvery`, `every` and `isEmpty` join `some`.)*
 
 ### Query features
 

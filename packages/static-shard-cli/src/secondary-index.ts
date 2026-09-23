@@ -291,6 +291,21 @@ export function meanPostingsLength(chunks: BuiltIndexChunk[]): number | undefine
   return entries === 0 ? undefined : postings / entries;
 }
 
+/**
+ * Ordinals of the shards holding at least one record whose `field` is a present `[]` — what `isEmpty`
+ * and `every` prune on (ADR-0010 §4). A missing key or `null` is not an empty list (§3), so neither
+ * counts.
+ */
+export function emptyListShards(groups: Record<string, unknown>[][], field: string): number[] {
+  const ordinals: number[] = [];
+  groups.forEach((group, ordinal) => {
+    if (group.some((record) => Array.isArray(record[field]) && (record[field] as unknown[]).length === 0)) {
+      ordinals.push(ordinal);
+    }
+  });
+  return ordinals;
+}
+
 /** Total UTF-8 bytes of the field's raw (non-null) string values — the "size of the column" ADR-0003 §7 warns against exceeding. */
 export function computeColumnBytes(groups: Record<string, unknown>[][], field: string, multi = false): number {
   let bytes = 0;

@@ -97,3 +97,47 @@ describe("some — existential match on multi-valued fields (T7)", () => {
     expect(matchesWhere({ genres: null }, { genres: { some: "Sci-Fi" } })).toBe(false);
   });
 });
+
+describe("list operators — hasEvery / every / isEmpty (ADR-0010)", () => {
+  const c = (colors: unknown) => (colors === undefined ? {} : { colors });
+
+  test("hasEvery: the list holds every listed value, in any order, extras allowed", () => {
+    expect(matchesWhere(c(["U", "W", "B"]), { colors: { hasEvery: ["W", "U"] } })).toBe(true);
+    expect(matchesWhere(c(["W"]), { colors: { hasEvery: ["W", "U"] } })).toBe(false);
+    expect(matchesWhere(c([]), { colors: { hasEvery: ["W"] } })).toBe(false);
+    // Vacuous: every present list holds all of nothing.
+    expect(matchesWhere(c([]), { colors: { hasEvery: [] } })).toBe(true);
+  });
+
+  test("every: all elements satisfy the element filter, and an empty list passes", () => {
+    expect(matchesWhere(c(["W", "U"]), { colors: { every: { in: ["W", "U"] } } })).toBe(true);
+    expect(matchesWhere(c(["W"]), { colors: { every: { in: ["W", "U"] } } })).toBe(true);
+    expect(matchesWhere(c([]), { colors: { every: { in: ["W", "U"] } } })).toBe(true);
+    expect(matchesWhere(c(["W", "B"]), { colors: { every: { in: ["W", "U"] } } })).toBe(false);
+  });
+
+  test("every accepts the same shorthand as some", () => {
+    expect(matchesWhere(c(["W", "W"]), { colors: { every: "W" } })).toBe(true);
+    expect(matchesWhere(c(["W", "U"]), { colors: { every: "W" } })).toBe(false);
+  });
+
+  test("isEmpty: true matches only a present []", () => {
+    expect(matchesWhere(c([]), { colors: { isEmpty: true } })).toBe(true);
+    expect(matchesWhere(c(["W"]), { colors: { isEmpty: true } })).toBe(false);
+  });
+
+  test("absent and null are not empty — every list operator needs a present list", () => {
+    for (const filter of [{ isEmpty: true }, { every: { in: ["W"] } }, { hasEvery: [] }]) {
+      expect(matchesWhere(c(undefined), { colors: filter })).toBe(false);
+      expect(matchesWhere(c(null), { colors: filter })).toBe(false);
+    }
+  });
+
+  test("keys on one field AND together — exactly [W, U] is hasEvery + every", () => {
+    const exactly = { colors: { hasEvery: ["W", "U"], every: { in: ["W", "U"] } } };
+    expect(matchesWhere(c(["U", "W"]), exactly)).toBe(true);
+    expect(matchesWhere(c(["W"]), exactly)).toBe(false);
+    expect(matchesWhere(c(["W", "U", "B"]), exactly)).toBe(false);
+    expect(matchesWhere(c([]), exactly)).toBe(false);
+  });
+});

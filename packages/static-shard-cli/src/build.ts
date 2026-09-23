@@ -15,6 +15,7 @@ import {
   buildTrigramIndex,
   computeColumnBytes,
   computeSecondaryZonemap,
+  emptyListShards,
   meanPostingsLength,
 } from "./secondary-index.js";
 import { cutIntoShards, materializeShards, shardRelPath } from "./shard.js";
@@ -128,6 +129,7 @@ export function materialize(
   const indexChunkDirs: Record<string, IndexChunkDirEntry[]> = {};
   const reversedChunkDirs: Record<string, IndexChunkDirEntry[]> = {};
   const trigramChunkDirs: Record<string, IndexChunkDirEntry[]> = {};
+  const emptyShards: Record<string, number[]> = {};
   const indexFiles: { relPath: string; content: string }[] = [];
   const warnings: string[] = [];
 
@@ -162,6 +164,7 @@ export function materialize(
     fieldsIndexed++;
     const multi = field.multi === true;
     secondaryZonemaps[name] = computeSecondaryZonemap(groups, name, field.kind, multi);
+    if (multi) emptyShards[name] = emptyListShards(groups, name);
     indexChunkDirs[name] = addIndexChunks(
       name,
       null,
@@ -220,6 +223,7 @@ export function materialize(
     indexChunkDirs,
     reversedChunkDirs,
     trigramChunkDirs,
+    emptyShards,
     formatVersion,
     generatorVersion,
   });

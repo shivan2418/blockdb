@@ -2,7 +2,7 @@ import { fetchIndexChunk } from "./index-fetch.js";
 import { ShardError } from "./errors.js";
 import { parseCorruptible } from "./fetch-file.js";
 import { matchesWhere } from "./filter.js";
-import { datasetCompression, fetchManifest, type IndexChunkDirEntry, type Manifest, type PairZonemapEntry } from "./manifest.js";
+import { datasetCompression, fetchManifest, type IndexChunkDirEntry, type IndexDescriptor, type Manifest, type PairZonemapEntry } from "./manifest.js";
 import {
   chunksForFilter,
   decodeIndexChunk,
@@ -59,16 +59,18 @@ function pairFilterOf(rawFilter: Record<string, unknown>): PairRangeFilter | und
 }
 
 /**
- * A multi-valued field's index is built over its elements, so pruning has to
- * read through `some` first (T7): `{ some: "x" }` unwraps to `{ equals: "x" }`;
- * `{ some: { startsWith: "x" } }` unwraps to its nested filter as-is. Absent
- * `some` (an untyped caller's malformed where) unwraps to `{}` — no pruning.
+ * A multi-valued field's index is built over its elements, so pruning reads through `some`/`every`
+ * to their element filter (T7, ADR-0010): `"x"` unwraps to `{ equals: "x" }`, an object form is used
+ * as-is.
  */
-function unwrapMultiFilter(rawFilter: Record<string, unknown>): Record<string, unknown> {
-  const someFilter = rawFilter.some;
-  if (someFilter === undefined) return {};
-  if (typeof someFilter === "object" && someFilter !== null) return someFilter as Record<string, unknown>;
-  return { equals: someFilter };
+function unwrapElementFilter(elementFilter: unknown): Record<string, unknown> {
+  if (typeof elementFilter === "object" && elementFilter !== null) return elementFilter as Record<string, unknown>;
+  return { equals: elementFilter };
+}
+
+/** `a ∪ b` over shard ordinals. */
+function unionSets(a: Set<number>, b: Set<number>): Set<number> {
+  return new Set([...a, ...b]);
 }
 
 /** The plumbing every chunk/shard fetch in one query shares — travels as a unit rather than three loose params. */
@@ -199,9 +201,67 @@ async function secondaryFieldCandidates(
   const indexDescriptor = manifest.indexes[field];
   if (!indexDescriptor) return undefined;
   const fieldMeta = manifest.schema.fields[field]!;
-  const kind = fieldMeta.kind as FieldKind;
-  const effectiveFilter = fieldMeta.multi ? unwrapMultiFilter(rawFilter) : rawFilter;
+  if (fieldMeta.multi) return listFieldCandidates(manifest, ctx, field, indexDescriptor, rawFilter);
+  return valueFilterCandidates(manifest, ctx, field, indexDescriptor, rawFilter);
+}
 
+/**
+ * A multi-valued field's candidates: each list operator present contributes a set, and they AND
+ * together like any keys on one field (ADR-0010 §2/§4). An operator that can't prune contributes
+ * nothing rather than an empty set.
+ */
+async function listFieldCandidates(
+  manifest: Manifest,
+  ctx: FetchContext,
+  field: string,
+  indexDescriptor: IndexDescriptor,
+  rawFilter: Record<string, unknown>,
+): Promise<Set<number> | undefined> {
+  const { some, every, hasEvery, isEmpty } = rawFilter as {
+    some?: unknown;
+    every?: unknown;
+    hasEvery?: unknown[];
+    isEmpty?: boolean;
+  };
+  // Missing on a manifest built before ADR-0010: unknown, so isEmpty/every can't prune — never "none".
+  const emptyShards = indexDescriptor.emptyShards && new Set(indexDescriptor.emptyShards);
+  const sets: Set<number>[] = [];
+
+  if (some !== undefined) {
+    const someSet = await valueFilterCandidates(manifest, ctx, field, indexDescriptor, unwrapElementFilter(some));
+    if (someSet) sets.push(someSet);
+  }
+
+  // A list passing `every: F` either has an element — which satisfies F, so it sits in `some: F`'s
+  // postings — or is empty, so it sits in an emptyShards shard.
+  if (every !== undefined && emptyShards) {
+    const elementSet = await valueFilterCandidates(manifest, ctx, field, indexDescriptor, unwrapElementFilter(every));
+    if (elementSet) sets.push(unionSets(elementSet, emptyShards));
+  }
+
+  // Every value must be present, so a match sits in every value's postings: intersect, not union.
+  if (hasEvery !== undefined && hasEvery.length > 0) {
+    const kind = manifest.schema.fields[field]!.kind as FieldKind;
+    for (const value of hasEvery) {
+      sets.push(await candidatesFromChunkedIndex(ctx, indexDescriptor.chunks, kind, { equals: value }));
+    }
+  }
+
+  if (isEmpty === true && emptyShards) sets.push(emptyShards);
+
+  if (sets.length === 0) return undefined;
+  return sets.reduce(intersectSets);
+}
+
+/** One value filter's candidates — a scalar field's filter, or a multi field's element filter. */
+async function valueFilterCandidates(
+  manifest: Manifest,
+  ctx: FetchContext,
+  field: string,
+  indexDescriptor: IndexDescriptor,
+  effectiveFilter: Record<string, unknown>,
+): Promise<Set<number> | undefined> {
+  const kind = manifest.schema.fields[field]!.kind as FieldKind;
   const { endsWith, contains } = effectiveFilter as { endsWith?: string; contains?: string };
   const sets: Set<number>[] = [];
 

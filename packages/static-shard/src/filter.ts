@@ -26,16 +26,34 @@ function matchesValueOp(value: unknown, op: string, opValue: unknown): boolean {
   }
 }
 
-/** `some` (T7): existential match over a multi-valued field's elements — shorthand value ≡ `{ equals: value }`. */
-function matchesSome(values: unknown[], someFilter: unknown): boolean {
-  if (typeof someFilter === "object" && someFilter !== null) {
-    return values.some((element) =>
-      Object.entries(someFilter as Record<string, unknown>).every(([op, opValue]) =>
-        matchesValueOp(element, op, opValue),
-      ),
+/** One element against `some`/`every`'s element filter — shorthand value ≡ `{ equals: value }`. */
+function matchesElement(element: unknown, elementFilter: unknown): boolean {
+  if (typeof elementFilter === "object" && elementFilter !== null) {
+    return Object.entries(elementFilter as Record<string, unknown>).every(([op, opValue]) =>
+      matchesValueOp(element, op, opValue),
     );
   }
-  return values.includes(someFilter);
+  return element === elementFilter;
+}
+
+/**
+ * The list operators on a multi-valued field: `some` (T7) plus ADR-0010's `hasEvery`, `every` and
+ * `isEmpty`. `undefined` means `op` isn't one of them.
+ */
+function matchesListOp(values: unknown[], op: string, opValue: unknown): boolean | undefined {
+  switch (op) {
+    case "some":
+      return values.some((element) => matchesElement(element, opValue));
+    case "every":
+      // Vacuously true for [] — "every colour is W or U" holds for a colourless card.
+      return values.every((element) => matchesElement(element, opValue));
+    case "hasEvery":
+      return (opValue as unknown[]).every((wanted) => values.includes(wanted));
+    case "isEmpty":
+      return (values.length === 0) === opValue;
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -63,9 +81,10 @@ export function matchesFieldFilter(record: Record<string, unknown>, field: strin
       continue;
     }
     if (isAbsent || isNull) return false;
-    if (op === "some") {
-      if (!matchesSome(value as unknown[], opValue)) return false;
-      continue;
+    if (Array.isArray(value)) {
+      const listMatch = matchesListOp(value, op, opValue);
+      if (listMatch === false) return false;
+      if (listMatch === true) continue;
     }
     if (!matchesValueOp(value, op, opValue)) return false;
   }

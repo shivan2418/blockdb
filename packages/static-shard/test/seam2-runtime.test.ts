@@ -1049,6 +1049,112 @@ function diskFetchBinary(requests: string[]): typeof fetch {
   }) as typeof fetch;
 }
 
+/** ADR-0010 fixture: one record per shard, so each shard fetch is attributable to one record. */
+const listConfig: StaticShardConfig = {
+  ...config,
+  shardBytes: 1,
+  schema: {
+    sortField: "year",
+    fields: {
+      year: { kind: "number" },
+      title: { kind: "string" },
+      colors: { kind: "string", indexed: true, multi: true },
+    },
+  },
+};
+
+const LIST_CARDS = [
+  { year: 1, title: "colorless", colors: [] as string[] },
+  { year: 2, title: "W", colors: ["W"] },
+  { year: 3, title: "U", colors: ["U"] },
+  { year: 4, title: "WU", colors: ["W", "U"] },
+  { year: 5, title: "UW", colors: ["U", "W"] },
+  { year: 6, title: "WUB", colors: ["W", "U", "B"] },
+  { year: 7, title: "B", colors: ["B"] },
+  { year: 8, title: "no colors key" },
+  { year: 9, title: "also colorless", colors: [] as string[] },
+  { year: 10, title: "R", colors: ["R"] },
+];
+
+describe("seam #2 — list operators hasEvery / every / isEmpty (ADR-0010), over a seam #1-built fixture tree", () => {
+  async function listClient(opts: { dropEmptyShards?: boolean } = {}) {
+    writeFileSync(path.join(tmpDir, "movies.ndjson"), LIST_CARDS.map((m) => JSON.stringify(m)).join("\n") + "\n");
+    const { outputDir, clientOutDir, manifest } = build(listConfig, {
+      baseDir: tmpDir,
+      generatorVersion: "0.1.0",
+      formatVersion: 0,
+    });
+    expect(manifest.shards).toHaveLength(LIST_CARDS.length);
+    if (opts.dropEmptyShards) {
+      // A pre-ADR-0010 build: same tree, no emptyShards.
+      const onDisk = JSON.parse(await readFile(path.join(outputDir, "manifest.json"), "utf8"));
+      delete onDisk.indexes.colors.emptyShards;
+      writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(onDisk));
+    }
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const requests: string[] = [];
+    const client = createClient<typeof schema, { movies: (typeof LIST_CARDS)[number] }>(schema, {
+      basePath: outputDir,
+      fetch: diskFetch(requests),
+    });
+    const shardFetches = () => requests.filter((r) => r.includes(`${path.sep}shards${path.sep}`)).length;
+    return { client, requests, shardFetches };
+  }
+
+  const titles = (records: { title: string }[]) => records.map((r) => r.title).sort();
+
+  test("hasEvery returns lists holding all values, fetching only shards in every value's postings", async () => {
+    const { client, shardFetches } = await listClient();
+    const result = await client.movies.findMany({ where: { colors: { hasEvery: ["W", "U"] } } });
+    expect(titles(result.records)).toEqual(["UW", "WU", "WUB"]);
+    // Intersection, not union: the mono-W and mono-U shards are never read.
+    expect(shardFetches()).toBe(3);
+  });
+
+  test("isEmpty returns only present [] lists, fetching only the emptyShards", async () => {
+    const { client, shardFetches } = await listClient();
+    const result = await client.movies.findMany({ where: { colors: { isEmpty: true } } });
+    // "no colors key" is absent, not empty (ADR-0010 §3).
+    expect(titles(result.records)).toEqual(["also colorless", "colorless"]);
+    expect(shardFetches()).toBe(2);
+  });
+
+  test("every ('at most W, U') includes empty lists and prunes to some's candidates plus emptyShards", async () => {
+    const { client, shardFetches } = await listClient();
+    const result = await client.movies.findMany({ where: { colors: { every: { in: ["W", "U"] } } } });
+    expect(titles(result.records)).toEqual(["U", "UW", "W", "WU", "also colorless", "colorless"]);
+    // Candidates: W/U postings (W, U, WU, UW, WUB) ∪ emptyShards (2). B, R and the absent record are skipped.
+    expect(shardFetches()).toBe(7);
+  });
+
+  test("exactly [W, U] is hasEvery + every on one field", async () => {
+    const { client, shardFetches } = await listClient();
+    const result = await client.movies.findMany({
+      where: { colors: { hasEvery: ["W", "U"], every: { in: ["W", "U"] } } },
+    });
+    expect(titles(result.records)).toEqual(["UW", "WU"]);
+    // The two keys' candidate sets intersect.
+    expect(shardFetches()).toBe(3);
+  });
+
+  test("count() stays a valid upper bound, and exact 0 when pruning leaves nothing", async () => {
+    const { client } = await listClient();
+    const bound = await client.movies.count({ colors: { isEmpty: true } });
+    expect(bound.count).toBeGreaterThanOrEqual(2);
+    expect(await client.movies.count({ colors: { hasEvery: ["W", "R"] } })).toEqual({ count: 0, exact: true });
+  });
+
+  test("a manifest without emptyShards (built before ADR-0010) still answers correctly, just without pruning", async () => {
+    const { client, shardFetches } = await listClient({ dropEmptyShards: true });
+    const empty = await client.movies.findMany({ where: { colors: { isEmpty: true } } });
+    expect(titles(empty.records)).toEqual(["also colorless", "colorless"]);
+    expect(shardFetches()).toBe(LIST_CARDS.length);
+
+    const atMost = await client.movies.findMany({ where: { colors: { every: { in: ["W", "U"] } } } });
+    expect(titles(atMost.records)).toEqual(["U", "UW", "W", "WU", "also colorless", "colorless"]);
+  });
+});
+
 describe("seam #2 — gzip shard payloads (T13, ADR-0002 §8)", () => {
   test("findMany transparently decompresses gzip shard payloads end-to-end over a real build", async () => {
     const gzipConfig: StaticShardConfig = { ...config, gzip: true };
