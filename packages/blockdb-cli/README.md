@@ -20,6 +20,10 @@ npx blockdb build                    # → public/blockdb/ (deploy this) + src/b
 
 Every wizard choice is also a CLI flag (nothing wizard-only), so `init --yes` with the right flags reproduces exactly what the wizard would have written — config generation is fully scriptable for CI.
 
+### When the data changes: `init --reinfer`
+
+`build` fails with a schema-drift error when the data no longer matches the config: a new `null`, a missing key, a value of the wrong kind. The error lists every affected field at once. `init --reinfer` re-reads the data and refreshes only what `init` learned from it: field kinds, `absent`/`nullable`, list fields, value sets, and fields added to or removed from the data. It keeps every choice you made: the sort field, the primary key, which fields are indexed, `endsWith`/`contains`, compression, block sizes, derived fields and `tsType`. New fields get the same defaults a first run gives them, and flags override everything.
+
 ### Inference reads everything by default
 
 `init` decides the baked schema, and a schema that is wrong about your data is the expensive kind of wrong: a value union missing a value that first appears at row 40,000, a field absent from the first 1000 rows, a cardinality that misprices an index or picks the wrong sort field. So `init` reads the whole input. `build` already does, so this asks for no memory a build doesn't.

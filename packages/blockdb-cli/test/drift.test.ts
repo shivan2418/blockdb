@@ -24,23 +24,39 @@ describe("assertNoSchemaDrift", () => {
   });
 
   test("a missing key fails unless the field is absent, since the generated type says it's always there", () => {
-    expect(() => assertNoSchemaDrift([{ year: 1999, genres: [] }], strict)).toThrow(/record 0 has no "title" key/);
-    expect(() => assertNoSchemaDrift([{ year: 1999, genres: [] }], strict)).toThrow(/"absent": true/);
+    expect(() => assertNoSchemaDrift([{ year: 1999, genres: [] }], strict)).toThrow(/Add "absent": true to:\n  - "title" \(has no key in 1 record, first record 0\)/);
     expect(() => assertNoSchemaDrift([{ year: 1999 }], fields)).not.toThrow();
   });
 
   test("a null fails unless the field is nullable, since the generated type says it's never null", () => {
     const records = [{ year: 1999, title: null, genres: [] }];
-    expect(() => assertNoSchemaDrift(records, strict)).toThrow(/record 0 has "title": null/);
-    expect(() => assertNoSchemaDrift(records, strict)).toThrow(/"nullable": true/);
+    expect(() => assertNoSchemaDrift(records, strict)).toThrow(/Add "nullable": true to:\n  - "title" \(is null in 1 record, first record 0\)/);
     expect(() => assertNoSchemaDrift(records, { ...strict, title: { kind: "string", nullable: true } })).not.toThrow();
   });
 
   test("a null list is a missing value too, allowed only on a nullable list field", () => {
     const records = [{ year: 1999, title: "T", genres: null }];
-    expect(() => assertNoSchemaDrift(records, strict)).toThrow(/"genres": null/);
+    expect(() => assertNoSchemaDrift(records, strict)).toThrow(/"nullable": true to:\n  - "genres"/);
     const nullableGenres = { ...strict, genres: { kind: "string" as const, indexed: true, multi: true, nullable: true } };
     expect(() => assertNoSchemaDrift(records, nullableGenres)).not.toThrow();
+  });
+
+  test("reports every drifting field in one error, grouped by fix, with counts", () => {
+    const records = [
+      { year: 1999, genres: [] },
+      { year: null, title: null, genres: [] },
+      { year: "2001", title: null },
+    ];
+    let message = "";
+    try {
+      assertNoSchemaDrift(records, strict);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain(`Add "absent": true to:\n  - "title" (has no key in 1 record, first record 0)\n  - "genres" (has no key in 1 record, first record 2)`);
+    expect(message).toContain(`Add "nullable": true to:\n  - "year" (is null in 1 record, first record 1)\n  - "title" (is null in 2 records, first record 1)`);
+    expect(message).toContain(`"year" is declared kind "number", but record 2 has a string value ("2001").`);
+    expect(message).toContain(`it keeps your sort field, indexed fields and other choices`);
   });
 
   test("payload-only json fields may be missing or null: they're opaque and always typed optional", () => {

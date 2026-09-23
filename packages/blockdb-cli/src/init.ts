@@ -269,8 +269,15 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     // full scan it is the longest stretch of the run and needs to visibly advance, not just announce.
     const inferred = inferSchema(sample, ...(opts.onProgress ? [{ onProgress: opts.onProgress }] : []));
 
-    sortField = opts.sortField ?? inferred.sortField;
-    pk = opts.pk ?? inferred.pk;
+    // `--reinfer` refreshes what init LEARNED from the data (kinds, absent/nullable, lists, value
+    // sets) and keeps what the user CHOSE: the sort field, the pk, which fields are indexed and
+    // their text opt-ins. Re-deriving choices from inference would silently re-plan a tuned deploy
+    // (a different sort field re-lays out every block). A choice only falls back to inference when
+    // the field it names is gone from the data. Flags still override everything below.
+    const priorSchema = existing?.schema;
+    const stillPresent = (name: string | undefined) => name !== undefined && inferred.fields[name] !== undefined;
+    sortField = opts.sortField ?? (stillPresent(priorSchema?.sortField) ? priorSchema!.sortField : inferred.sortField);
+    pk = opts.pk ?? (priorSchema === undefined ? inferred.pk : stillPresent(priorSchema.pk) ? priorSchema.pk : undefined);
     inferredShapes = Object.fromEntries(Object.entries(inferred.fields).map(([name, f]) => [name, f.shape]));
 
     const defaultIndexed = new Set(inferred.indexedFields);
@@ -278,21 +285,32 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
 
     fields = {};
     for (const [name, f] of Object.entries(inferred.fields)) {
+      const priorField = priorSchema?.fields[name];
       const cfg: FieldConfig = { kind: f.kind };
-      const isIndexed = f.kind !== "json" && name !== sortField && (defaultIndexed.has(name) || f.multi);
+      // A field the config already had keeps its indexing choice; a field new to the data gets the
+      // same recommendation a first run would give it.
+      const wantsIndex = priorField !== undefined ? priorField.indexed === true : defaultIndexed.has(name);
+      const isIndexed = f.kind !== "json" && name !== sortField && (wantsIndex || f.multi);
       if (isIndexed) cfg.indexed = true;
-      // Only a queryable field's values are worth baking — that's what the union narrows.
-      if (isIndexed && f.values) cfg.values = f.values;
+      // Only a queryable field's values are worth baking — that's what the union narrows. Whether a
+      // field HAS a union is the user's call once made (deleting `values` widens it on purpose), but
+      // its members are a fact, so an existing union is refreshed from the data.
+      const wantsValues = priorField === undefined || priorField.values !== undefined;
+      if (isIndexed && f.values && wantsValues) cfg.values = f.values;
       if (f.multi) cfg.multi = true;
       // Facts about the data, recorded on every field so the generated record type tells the truth.
       // Which missing-value operators they unlock is decided later, from the field's role.
       if (f.absent) cfg.absent = true;
       if (f.nullable) cfg.nullable = true;
+      // Text-index opt-ins are choices too, kept while the field can still carry them.
+      if (isIndexed && f.kind === "string") {
+        if (priorField?.endsWith) cfg.endsWith = true;
+        if (priorField?.contains) cfg.contains = true;
+      }
       // `tsType`/`tsImport` are the one part of a field config inference can never produce — the user
       // hand-writes them. `--reinfer` re-reads the DATA's shape, so carry them over rather than
       // silently discarding work. Dropped if the field stopped being a payload field, since a scalar
       // kind can't carry a tsType (config.ts rejects it).
-      const priorField = existing?.schema.fields[name];
       // `valuesType` is hand-authored (only the user knows two fields are the same concept), so
       // --reinfer must carry it over — but only while the field still HAS a value union to name.
       if (isIndexed && f.values && priorField?.valuesType !== undefined) cfg.valuesType = priorField.valuesType;
@@ -343,6 +361,9 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     ...(basePath !== undefined ? { basePath } : {}),
     ...(blockBytes !== undefined ? { blockBytes } : {}),
     ...(indexChunkBytes !== undefined ? { indexChunkBytes } : {}),
+    // No flag sets these; carry them over so re-running init never silently turns compression off.
+    ...(existing?.compression !== undefined ? { compression: existing.compression } : {}),
+    ...(existing?.gzip !== undefined ? { gzip: existing.gzip } : {}),
     schema: { sortField, ...(pk !== undefined ? { pk } : {}), fields },
   };
 

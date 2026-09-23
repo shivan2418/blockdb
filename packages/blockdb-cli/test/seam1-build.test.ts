@@ -1302,6 +1302,76 @@ describe("seam #1 — init --yes → build (T10)", () => {
     expect(after.schema.fields.brand).toBeDefined();
   });
 
+  test("--reinfer refreshes facts about the data but keeps every choice the user made", () => {
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    // A hand-tuned config: string sort field, a trimmed indexed set, a text opt-in, compression, a
+    // non-default block size. None of these are what inference would pick on its own.
+    const tuned: BlockDbConfig = {
+      collection: "products",
+      input: { path: "products.ndjson" },
+      blockBytes: 1234,
+      compression: "gzip",
+      schema: {
+        sortField: "name",
+        pk: "id",
+        fields: {
+          id: { kind: "string", indexed: true },
+          name: { kind: "string" },
+          category: { kind: "string", indexed: true, contains: true, values: ["books", "electronics", "toys"] },
+          price: { kind: "number" },
+        },
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(tuned, null, 2));
+
+    // The data changes: a new category, some null prices, and a new sometimes-missing field.
+    const changed = [
+      ...PRODUCTS.map((p, i) => ({ ...p, price: i === 0 ? null : p.price, ...(i % 2 === 0 ? { note: "sale" } : {}) })),
+      { id: "p6", category: "garden", price: 12, name: "Trowel" },
+    ];
+    writeFileSync(path.join(tmpDir, "products.ndjson"), changed.map((p) => JSON.stringify(p)).join("\n") + "\n");
+
+    const { config } = init({ cwd: tmpDir, configPath, yes: true, fullScan: true, reinfer: true });
+
+    // choices kept
+    expect(config.schema.sortField).toBe("name");
+    expect(config.schema.pk).toBe("id");
+    expect(config.compression).toBe("gzip");
+    expect(config.blockBytes).toBe(1234);
+    expect(config.schema.fields.price!.indexed).toBeUndefined();
+    expect(config.schema.fields.category!.contains).toBe(true);
+    // facts refreshed
+    expect(config.schema.fields.price!.nullable).toBe(true);
+    expect(config.schema.fields.category!.values).toEqual(["books", "electronics", "garden", "toys"]);
+    expect(config.schema.fields.note).toMatchObject({ kind: "string", absent: true });
+    // and the refreshed config builds against the changed data
+    expect(() => build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 })).not.toThrow();
+  });
+
+  test("--reinfer leaves a deliberately widened field widened", () => {
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    writeProducts(tmpDir);
+    const { config: first } = init({ cwd: tmpDir, configPath, yes: true, fullScan: true, inputPath: "products.ndjson" });
+    // The user deletes `values` to widen an indexed enum-like field back to plain string.
+    const enumField = Object.entries(first.schema.fields).find(([, f]) => f.values !== undefined)![0];
+    const widened = JSON.parse(readFileSync(configPath, "utf8")) as BlockDbConfig;
+    delete widened.schema.fields[enumField]!.values;
+    writeFileSync(configPath, JSON.stringify(widened, null, 2));
+
+    const { config } = init({ cwd: tmpDir, configPath, yes: true, fullScan: true, reinfer: true });
+    expect(config.schema.fields[enumField]!.values).toBeUndefined();
+  });
+
+  test("re-running init without --reinfer keeps compression", () => {
+    writeProducts(tmpDir);
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    init({ cwd: tmpDir, configPath, yes: true, fullScan: true, inputPath: "products.ndjson" });
+    const withCompression = { ...(JSON.parse(readFileSync(configPath, "utf8")) as BlockDbConfig), compression: "brotli" as const };
+    writeFileSync(configPath, JSON.stringify(withCompression, null, 2));
+
+    expect(init({ cwd: tmpDir, configPath, yes: true }).config.compression).toBe("brotli");
+  });
+
   test("without --reinfer, re-running init on an existing config reuses the baked schema untouched", () => {
     writeProducts(tmpDir);
     const configPath = path.join(tmpDir, "blockdb.config.json");

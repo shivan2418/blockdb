@@ -50,7 +50,7 @@ Inference
   --full-scan               Infer from every record (the default; explicit form)
   --sample                  Infer from a leading sample instead of the whole input
   --sample-size <n>         Infer from the leading <n> records instead of the whole input
-  --reinfer                 Re-infer even though a config already exists
+  --reinfer                 Refresh what the config learned from the data (see below)
 
 Output
   --output <dir>            Served data tree (default: public/blockdb)
@@ -63,6 +63,13 @@ Other
   --yes                     No prompts — accept the inferred defaults
   --config <path>           Where to write the config (default: blockdb.config.json)
   -h, --help                Show this help
+
+With an existing config, --reinfer re-reads the data and refreshes only what init
+learned from it: field kinds, absent/nullable, list fields, value sets, and fields
+added to or removed from the data. It keeps your choices: the sort field, the pk,
+which fields are indexed, endsWith/contains, compression, block sizes, derived
+fields and tsType. New fields get the same defaults a first run would give them.
+Flags still override everything.
 
 Fields holding nested or mixed-type values become payload-only: still stored and
 returned by findMany, but not filterable. Naming one in --indexed/--ends-with/
