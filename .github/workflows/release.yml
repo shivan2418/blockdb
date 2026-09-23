@@ -1,0 +1,42 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Tag matches package versions
+        run: |
+          for pkg in blockdb blockdb-cli; do
+            version=$(node -p "require('./packages/$pkg/package.json').version")
+            if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::$pkg is $version but the tag is $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm --filter example-shared exec playwright install --with-deps chromium
+      - run: pnpm test
+      - run: pnpm pack:check
+      - name: Pack tarballs
+        run: |
+          mkdir release
+          pnpm --filter blockdb --filter blockdb-cli exec pnpm pack --pack-destination "$GITHUB_WORKSPACE/release"
+          ls -l release
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(awk -v v="${GITHUB_REF_NAME#v}" '$0 == "## " v {on=1; next} /^## / {on=0} on' packages/blockdb/CHANGELOG.md)
+          gh release create "$GITHUB_REF_NAME" release/*.tgz --title "$GITHUB_REF_NAME" --notes "$notes"
