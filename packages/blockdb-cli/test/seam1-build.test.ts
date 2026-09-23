@@ -1605,6 +1605,10 @@ describe("seam #1 — external sort scale hardening (T13)", () => {
     // ...and the whole served tree is brotli, manifest and index chunks included
     expect(existsSync(path.join(br.outputDir, "manifest.json.br"))).toBe(true);
     for (const chunk of br.manifest.indexes.title?.chunks ?? []) expect(chunk.file).toMatch(/\.json\.br$/);
+
+    // raw-bytes hosts can't serve it to Chrome, so every brotli build says so; plain builds don't
+    expect(br.warnings.some((w) => w.includes("Content-Encoding: br"))).toBe(true);
+    expect(plain.warnings.some((w) => w.includes("Content-Encoding: br"))).toBe(false);
   });
 
   test("optional build-time gzip writes .ndjson.gz blocks, flags manifest.dataset.compression, and preserves block hashes (ADR-0002 §8)", () => {

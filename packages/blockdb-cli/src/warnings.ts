@@ -1,5 +1,5 @@
 import type { ValueShape } from "./infer.js";
-import type { BlockDescriptor } from "./types.js";
+import type { BlockDescriptor, Compression } from "./types.js";
 
 /** Heuristic average sort-value run length past which a sort field counts as "low cardinality" (ADR-0002 §6) — scale-free, so it works identically whether cardinality came from raw records or block-boundary split-points. Not a hard rule: `cutIntoBlocks` caps real `blockCount` at cardinality (equal-key runs never split), so this can't be phrased as "fewer distinct values than blocks". */
 const LOW_CARDINALITY_AVG_RUN_LENGTH = 20;
@@ -105,4 +105,15 @@ export function skewedBlocksWarning(blocks: BlockDescriptor[]): string | undefin
   const oversized = blocks.filter((s) => s.bytes > meanBytes * 2);
   if (oversized.length === 0) return undefined;
   return `blockdb: ${oversized.length} block(s) are more than 2x the mean block size (${Math.round(meanBytes)} bytes) — likely an equal-key pileup on the sort field or an oversized record (ADR-0002 §5/§6).`;
+}
+
+/**
+ * `compression: "brotli"` only works where the host decodes the `.br` files at the transport layer
+ * (`Content-Encoding: br`). A host that serves raw bytes (GitHub Pages, plain object-storage buckets)
+ * leaves decoding to `DecompressionStream("brotli")`, which Chrome does not ship yet, so the deploy
+ * fails there with CORRUPT_DATA. The build can't see the host, so this warns on every brotli build.
+ */
+export function brotliHostSupportWarning(compression: Compression): string | undefined {
+  if (compression !== "brotli") return undefined;
+  return `blockdb: compression "brotli" needs a host that serves .br files with Content-Encoding: br. On raw-bytes hosts (GitHub Pages, plain object storage) Chrome can't decode them yet, because it doesn't support DecompressionStream("brotli"); use "gzip" there. See docs/deploy-guide.md.`;
 }

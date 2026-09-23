@@ -55,10 +55,14 @@ Same-origin deploys (the common case: `public/blockdb/` under your own site) nee
 - **Never double-compress**: if you enable build-time `gzip`, make sure the host doesn't *also*
   re-gzip an already-gzipped `.gz` file — check the `Content-Encoding` response header actually
   served, not just what you configured. This is the main reason `gzip` is off by default.
-- **Brotli** is available as `compression: "brotli"` — `DecompressionStream` now supports it per the
-  Compression Streams spec (note the naming trap: the file suffix is `.br`, matching
-  `Content-Encoding: br`, but the API's format string is `"brotli"`). It is **not** the default, and
-  the reason is not just client support:
+- **Brotli** is available as `compression: "brotli"` (note the naming trap: the file suffix is `.br`,
+  matching `Content-Encoding: br`, but the API's format string is `"brotli"`). **Only use it on a host
+  that serves `.br` files with `Content-Encoding: br`**, so the browser decodes them at the transport
+  layer. On a raw-bytes host (GitHub Pages, a plain object-storage bucket) the runtime falls back to
+  `DecompressionStream("brotli")`, which is in the Compression Streams spec but that Chrome does not
+  ship yet. Every query then fails with `CORRUPT_DATA` in Chrome. Use `gzip` on those hosts;
+  `blockdb build` warns on every brotli build as a reminder. It is **not** the default, and the reason
+  is not just client support:
 
   Brotli's advantage over gzip grows with file size, and blockdb deliberately ships *many small
   files*. Measured on real JSON: **7%** smaller on a 45 KB index chunk, **13%** at 256 KB, **24%** on

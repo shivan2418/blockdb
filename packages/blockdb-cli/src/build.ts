@@ -27,6 +27,7 @@ import { compressionSuffix, type Compression } from "./types.js";
 import type { IndexChunkDirEntry, Manifest, PairZonemapEntry, ResolvedConfig, BlockDbConfig } from "./types.js";
 import { getFormatVersion, getGeneratorVersion } from "./version.js";
 import {
+  brotliHostSupportWarning,
   lowCardinalitySortFieldWarning,
   oversizedRecordWarning,
   skewedBlocksWarning,
@@ -246,6 +247,9 @@ export function materialize(
     sortFieldCardinalityOf(records, resolved.sortField),
   );
   if (cardinalityWarning) warnings.push(cardinalityWarning);
+
+  const brotliWarning = brotliHostSupportWarning(resolved.compression);
+  if (brotliWarning) warnings.push(brotliWarning);
 
   return { manifest, blockFiles, indexFiles, warnings };
 }

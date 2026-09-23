@@ -4,8 +4,6 @@ Query large datasets from any static host: no backend, no WASM, no HTTP Range re
 
 `blockdb` splits a large dataset into many small files at build time, builds indexes over them, and generates a **typed client** that fetches only the files a query needs. Because it fetches whole small files (not byte ranges of one big file), it works on any dumb static host and every block is a plain, compressible, cacheable CDN object.
 
-> **Status: v1.0, built against the locked design spec.** The previous prototype (attempt #2) is preserved on the [`attempt-2-reference`](https://github.com/shivan2418/blockdb/tree/attempt-2-reference) branch for reference only — it is **not** the basis for this build.
-
 ## Quickstart
 
 ```bash
