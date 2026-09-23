@@ -128,7 +128,7 @@ await db.books.findMany({ where: { inStock: { equals: true } } }); // ✗ only a
 await db.books.count({ inStock: { equals: true } });               // ✓ an upper bound, no download
 ```
 
-**Checking a `where` built from UI input.** The compiler can't see the rules that depend on a value. `contains` prunes only with **3 or more characters**, because a shorter needle has no trigram to look up. An empty `startsWith` or `endsWith`, an empty `hasEvery` and `isEmpty: false` match every block, so they ride too. So `{ title_fold: { contains: "ab" } }` or `{ tags: { hasEvery: [] } }` (no chip selected) type-checks, then throws `NEEDS_PRUNING` at runtime if nothing else in the `where` prunes. To fall back instead of catching the error, ask `wherePrunes` first. It applies exactly the rule `findMany` enforces:
+**Checking a `where` built from UI input.** The compiler can't see the rules that depend on a value. `contains` prunes only with **3 or more characters**, because a shorter needle has no trigram to look up. An empty `startsWith` or `endsWith`, an empty `hasEvery` and `isEmpty: false` match every block, so they ride too. So `{ title_fold: { contains: "ab" } }` or `{ tags: { hasEvery: [] } }` (no chip selected) type-checks, then throws `NEEDS_PRUNING` at runtime if nothing else in the `where` prunes. To fall back instead of catching the error, ask `wherePrunes` first. It applies exactly the rule `findMany` enforces, against the schema you pass. `findMany` checks against the deployed manifest's schema, so the two agree as long as the bundled client and the deploy come from the same build:
 
 ```ts
 import { normalize, wherePrunes } from "blockdb";
