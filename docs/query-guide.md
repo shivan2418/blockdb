@@ -337,6 +337,34 @@ const book = await db.books.get("b-00042"); // the record, or null
 
 It's a compile error on a collection without a primary key.
 
+## Cancelling a query
+
+`findMany`, `count` and `get` take an optional `signal`, the standard `AbortSignal`. When it fires, the query's pending fetches are cancelled and the call rejects with `BlockDbError` code `ABORTED`. This suits search-as-you-type, where each keystroke supersedes the last query:
+
+```ts
+let search: AbortController | undefined;
+
+async function onInput(term: string) {
+  search?.abort(); // the previous keystroke's query stops downloading
+  search = new AbortController();
+  try {
+    const { records } = await db.books.findMany({
+      where: { title: { startsWith: term } },
+      limit: 10,
+      signal: search.signal,
+    });
+    return records;
+  } catch (e) {
+    if (e instanceof BlockDbError && e.code === "ABORTED") return undefined; // superseded
+    throw e;
+  }
+}
+```
+
+`count(where, { signal })` and `get(id, { signal })` work the same way. Cancelling one query never cancels the manifest download that other queries share: the cancelled query just stops waiting for it. A cancelled query also skips the stale-manifest retry described under [Errors](#errors).
+
+A cancelled download is lost, so don't cancel by reflex. If the next query needs mostly the same files, which is typical when a prefix grows by one letter on the sort field, letting the old query finish fills the browser cache for the new one. Cancel when the old query's files are no longer the ones you need.
+
 ## What a query costs
 
 Every query first loads the manifest (once per client, revalidated with the host via `cache: "no-cache"`). The manifest records each file's value ranges, so the sort field and number/date ranges can rule out files without fetching anything else. Other operators may fetch small index chunks (about 45 KB each) to find which files contain a value. blockdb then fetches the remaining data files.
@@ -386,6 +414,7 @@ try {
 | `CORRUPT_DATA` | A file didn't parse, or didn't decompress (for example, brotli on a host that can't serve it; see the [deploy guide](deploy-guide.md)). | No |
 | `LIMIT_EXCEEDED` | The query would return more than `maxResults`. | No, paginate |
 | `NEEDS_PRUNING` | Every filter in the `where` is a [rider](#riders-filters-that-dont-narrow-the-read), so the query would read the whole dataset. Add a filter that prunes. | No |
+| `ABORTED` | The query's `signal` fired (see [Cancelling a query](#cancelling-a-query)). Not a failure: usually a newer query superseded it. | No, ignore it |
 
 Errors carry `e.url` (the file being fetched) where relevant. They never include your `where`, so filter values don't end up in logs. There's no built-in retry for network errors: wrap `fetch` instead, as the [deploy guide](deploy-guide.md) shows. The one thing blockdb retries is a stale manifest: if a file the manifest names returns 404, it refetches the manifest with `cache: "reload"`, and if the new manifest no longer names that file, it reruns the query once against it. This covers a browser that kept the previous deploy's manifest after a redeploy.
 

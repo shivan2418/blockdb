@@ -12,6 +12,7 @@ export {
   type FieldKind,
   type FieldMeta,
   type FindManyArgs,
+  type QueryOptions,
   type FindManyResult,
   type GenericClient,
   type OrderByOf,

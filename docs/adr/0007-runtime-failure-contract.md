@@ -44,6 +44,7 @@ Every failure maps to exactly one code — as fine-grained as the caller's *reac
 | `NETWORK` | `fetch` rejected, **or** resolved non-ok non-404 (500/403/429/…); optional `.status` | maybe |
 | `CORRUPT_DATA` | fetch resolved 2xx but the body won't parse / decompress (bad JSON·NDJSON·encoding) | no |
 | `LIMIT_EXCEEDED` | the `maxResults` ceiling (ADR-0004) | no |
+| `ABORTED` | *(Added 2026-09-23, #33.)* the caller's `signal` option fired; the query's pending fetches were cancelled | no — not a failure |
 
 Judgment calls:
 - **`HTTP` and `NETWORK` merged.** An earlier draft split resolved-non-ok (`HTTP`) from fetch-rejection (`NETWORK`). Merged into one `NETWORK` code carrying an optional `.status` (present when it came from a resolved response, absent on rejection). The retryability signal the split was meant to give is already delivered by keeping the deterministic codes (`CONFIG`/`FORMAT_VERSION`/`DEPLOY_INTEGRITY`/`CORRUPT_DATA`) distinct — `NETWORK` is the one "maybe transient" bucket.
@@ -62,7 +63,7 @@ This keeps `NETWORK` populated only by genuinely-maybe-transient failures, so a 
 
 ### 7. Concurrency — fail-fast + abort
 
-On the first failure of any fan-out fetch, the runtime rejects the query and **cancels the outstanding parallel fetches** via a shared `AbortController` (standard, zero-dep) whose `signal` is passed to the injected `fetch`. First-failure-wins. *Settle-all-then-throw* was rejected: it wastes bandwidth finishing a doomed query. The cost is giving up an aggregate "here are all N missing shards" report — deemed an acceptable trade for 1.0. A custom `fetch` that ignores `signal` loses only the cancellation savings; correctness is unaffected.
+On the first failure of any fan-out fetch, the runtime rejects the query and **cancels the outstanding parallel fetches** via a shared `AbortController` (standard, zero-dep) whose `signal` is passed to the injected `fetch`. First-failure-wins. *Settle-all-then-throw* was rejected: it wastes bandwidth finishing a doomed query. The cost is giving up an aggregate "here are all N missing shards" report — deemed an acceptable trade for 1.0. A custom `fetch` that ignores `signal` loses only the cancellation savings; correctness is unaffected. *(Amended 2026-09-23, #33: `findMany`, `count` and `get` take an optional caller `signal`. It fires the same per-query controller, so the query's pending fetches cancel, and the call rejects with `ABORTED`. The shared manifest fetch is never aborted by one query's signal, since other queries may be waiting on it: the cancelled query only stops waiting. A cancelled query skips the §2 stale-manifest retry, and it rejects promptly even when a custom `fetch` ignores `signal`.)*
 
 ### 8. Error payload
 

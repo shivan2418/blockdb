@@ -15,6 +15,8 @@
  * - `CORRUPT_DATA` — 2xx body won't parse into JSON/NDJSON/domain structure. Not retryable.
  * - `LIMIT_EXCEEDED` — the `maxResults` ceiling (fail-loud, never truncates). Not retryable.
  * - `NEEDS_PRUNING` — a `findMany` where made only of riders, which would read every block (ADR-0013). Not retryable.
+ * - `ABORTED` — the caller's `signal` fired, and the query's pending fetches were cancelled. Not a failure:
+ *   usually a newer query superseded this one, so there is nothing to retry or log.
  */
 export type BlockDbErrorCode =
   | "CONFIG"
@@ -23,7 +25,8 @@ export type BlockDbErrorCode =
   | "NETWORK"
   | "CORRUPT_DATA"
   | "LIMIT_EXCEEDED"
-  | "NEEDS_PRUNING";
+  | "NEEDS_PRUNING"
+  | "ABORTED";
 
 export interface BlockDbErrorInit {
   readonly code: BlockDbErrorCode;
@@ -31,7 +34,7 @@ export interface BlockDbErrorInit {
   readonly message: string;
   /** The underlying thrown error, chained via native ES2022 `Error.cause`. */
   readonly cause?: unknown;
-  /** The file being fetched when it failed — absent for LIMIT_EXCEEDED and NEEDS_PRUNING. */
+  /** The file being fetched when it failed — absent for LIMIT_EXCEEDED, NEEDS_PRUNING and ABORTED. */
   readonly url?: string;
   /** HTTP status — present on NETWORK-from-response and the two 404 codes. */
   readonly status?: number;

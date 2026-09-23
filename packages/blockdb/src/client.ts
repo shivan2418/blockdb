@@ -36,6 +36,7 @@ interface RawFindManyArgs {
   orderBy?: Record<string, "asc" | "desc">;
   limit?: number;
   offset?: number;
+  signal?: AbortSignal;
 }
 
 /** Only equals/in/startsWith prune via the inverted index (ADR-0003 §7); other keys (e.g. `not`) don't. */
@@ -86,10 +87,18 @@ interface FetchContext {
   track<T>(promise: Promise<T>): Promise<T>;
   /** Sync counterpart of track, for post-fetch decode/parse steps — the same first-failure abort must fire (ADR-0007 §7). */
   trackSync<T>(fn: () => T): T;
+  /** Unhooks the caller's signal once the query is over, so a long-lived signal doesn't collect listeners. */
+  dispose(): void;
 }
 
-function makeFetchContext(basePath: string, fetchImpl: typeof fetch): FetchContext {
+/**
+ * `callerSignal` is the query's `signal` option: when it fires, the same controller that the first
+ * failure fires aborts every fetch still pending in this query.
+ */
+function makeFetchContext(basePath: string, fetchImpl: typeof fetch, callerSignal?: AbortSignal): FetchContext {
   const controller = new AbortController();
+  const onCallerAbort = () => controller.abort(callerSignal!.reason);
+  callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
   const abortAndRethrow = (error: unknown): never => {
     controller.abort(error);
     throw error;
@@ -108,7 +117,33 @@ function makeFetchContext(basePath: string, fetchImpl: typeof fetch): FetchConte
         return abortAndRethrow(error);
       }
     },
+    dispose: () => callerSignal?.removeEventListener("abort", onCallerAbort),
   };
+}
+
+function abortedError(signal: AbortSignal): BlockDbError {
+  return new BlockDbError({
+    code: "ABORTED",
+    message:
+      "blockdb: the query was cancelled by its signal, and its pending fetches were aborted. Nothing is wrong " +
+      "with the deploy; if a newer query superseded this one, ignore it.",
+    cause: signal.reason,
+  });
+}
+
+/**
+ * Settles with `promise`, or rejects with ABORTED as soon as `signal` fires, whichever comes first.
+ * Used for waits a query doesn't own: the shared manifest fetch keeps going for the other queries,
+ * and an injected fetch that ignores its signal can't hold a cancelled query open.
+ */
+function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) return Promise.reject(abortedError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortedError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 /**
@@ -580,18 +615,36 @@ export function createClient<S extends SchemaMeta, Records>(
    * (index chunks and sidecars are cached per query, so there is nothing else to drop). If it still
    * names the file, that's a real partial deploy and the original error is thrown. A second
    * failure on the rerun throws as-is: the retry is bounded at one, so it can never loop.
+   *
+   * `signal` is the caller's: it aborts this query's own fetches, and a cancelled query rejects with
+   * ABORTED and never retries. The shared manifest fetch and refetch are only raced, never aborted,
+   * because other queries may be waiting on them.
    */
-  const withManifest = async <T>(run: (manifest: Manifest) => Promise<T>): Promise<T> => {
-    const manifest = await getManifest();
+  const withManifest = async <T>(
+    signal: AbortSignal | undefined,
+    run: (manifest: Manifest, ctx: FetchContext) => Promise<T>,
+  ): Promise<T> => {
+    const attempt = async (manifest: Manifest): Promise<T> => {
+      const ctx = makeFetchContext(basePath, fetchImpl, signal);
+      try {
+        return await raceAbort(run(manifest, ctx), signal);
+      } finally {
+        ctx.dispose();
+      }
+    };
+
+    const manifest = await raceAbort(getManifest(), signal);
     try {
-      return await run(manifest);
+      return await attempt(manifest);
     } catch (error) {
+      // Whatever a cancelled query's fetches threw on the way out, the caller asked for this.
+      if (signal?.aborted) throw abortedError(signal);
       if (!(error instanceof BlockDbError) || error.code !== "DEPLOY_INTEGRITY" || error.url === undefined) throw error;
       // A refetch that itself fails (a 5xx, a FORMAT_VERSION from a newer build) throws its own,
       // more telling, error.
-      const fresh = await refreshManifest(manifest);
+      const fresh = await raceAbort(refreshManifest(manifest), signal);
       if (manifestReferences(fresh, basePath, error.url)) throw error;
-      return await run(fresh);
+      return await attempt(fresh);
     }
   };
 
@@ -599,14 +652,14 @@ export function createClient<S extends SchemaMeta, Records>(
     const collection: Record<string, unknown> = {
       findMany: async (args?: RawFindManyArgs) => {
         assertLimitWithinCeiling(args?.limit, maxResults);
-        return withManifest((manifest) => {
+        return withManifest(args?.signal, (manifest, ctx) => {
           // After the manifest (which says what prunes on this dataset), before any index or block fetch.
           assertWhereHasPruning(args?.where, manifest.schema);
-          return executeFindMany(manifest, makeFetchContext(basePath, fetchImpl), args, maxResults);
+          return executeFindMany(manifest, ctx, args, maxResults);
         });
       },
-      count: async (where?: Record<string, Record<string, unknown>>) =>
-        withManifest((manifest) => executeCount(manifest, makeFetchContext(basePath, fetchImpl), where)),
+      count: async (where?: Record<string, Record<string, unknown>>, opts?: { signal?: AbortSignal }) =>
+        withManifest(opts?.signal, (manifest, ctx) => executeCount(manifest, ctx, where)),
       getSchema: () => meta,
     };
 
@@ -616,9 +669,9 @@ export function createClient<S extends SchemaMeta, Records>(
     // entirely (not even a stubbed throw) when no PK was declared (T1/ADR-0004).
     if (meta.pk !== undefined) {
       const pkField = meta.pk;
-      collection.get = async (id: unknown) => {
-        const { records } = await withManifest((manifest) =>
-          executeFindMany(manifest, makeFetchContext(basePath, fetchImpl), { where: { [pkField]: { equals: id } }, limit: 1 }, maxResults),
+      collection.get = async (id: unknown, opts?: { signal?: AbortSignal }) => {
+        const { records } = await withManifest(opts?.signal, (manifest, ctx) =>
+          executeFindMany(manifest, ctx, { where: { [pkField]: { equals: id } }, limit: 1 }, maxResults),
         );
         return records[0] ?? null;
       };

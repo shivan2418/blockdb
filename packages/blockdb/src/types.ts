@@ -294,13 +294,24 @@ type PkIdOf<C extends CollectionMeta> = PkField<C> extends keyof C["fields"]
 
 type GetMember<C extends CollectionMeta, Rec> = PkField<C> extends never
   ? {}
-  : { get(id: PkIdOf<C>): Promise<Rec | null> };
+  : { get(id: PkIdOf<C>, opts?: QueryOptions): Promise<Rec | null> };
 
 // ---------------------------------------------------------------------------
 // The collection surface: `findMany` (T2) + `count` (T4) + `getSchema` +
 // `get(id)` (T8, conditional on a declared PK).
 // ---------------------------------------------------------------------------
-export interface FindManyArgs<C extends CollectionMeta, W extends WhereOf<C>> {
+/**
+ * Per-query options every collection method accepts. `signal` cancels the query: its pending block,
+ * index and sidecar fetches are aborted and the call rejects with `BlockDbError` code `ABORTED`.
+ * The manifest fetch, shared by every query on the client, is never cancelled: an aborted query only
+ * stops waiting for it. For search-as-you-type, abort the previous keystroke's query before starting
+ * the next.
+ */
+export interface QueryOptions {
+  signal?: AbortSignal;
+}
+
+export interface FindManyArgs<C extends CollectionMeta, W extends WhereOf<C>> extends QueryOptions {
   where?: W & ValidateWhere<W, C> & RiderGuard<W, C>;
   orderBy?: OrderByOf<C>;
   limit?: number;
@@ -340,7 +351,7 @@ export interface CountResult {
  * Reserved for the deferred v2 exact mode — 1.0 locks the slot to `false`, so
  * passing `exact: true` is a compile-time error (ADR-0008 §4).
  */
-export interface CountOptions {
+export interface CountOptions extends QueryOptions {
   exact?: false;
 }
 
