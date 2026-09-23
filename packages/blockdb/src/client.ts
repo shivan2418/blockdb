@@ -99,7 +99,9 @@ interface FetchContext {
 function makeFetchContext(basePath: string, fetchImpl: typeof fetch, callerSignal?: AbortSignal): FetchContext {
   const controller = new AbortController();
   const onCallerAbort = () => controller.abort(callerSignal!.reason);
-  callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  // An abort event has already fired for a signal that is aborted by now, so the listener would never run.
+  if (callerSignal?.aborted) onCallerAbort();
+  else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
   const abortAndRethrow = (error: unknown): never => {
     controller.abort(error);
     throw error;
@@ -139,7 +141,11 @@ function abortedError(signal: AbortSignal): BlockDbError {
  */
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (signal === undefined) return promise;
-  if (signal.aborted) return Promise.reject(abortedError(signal));
+  if (signal.aborted) {
+    // Nobody else may be listening to `promise`; its later rejection mustn't surface as unhandled.
+    promise.catch(() => {});
+    return Promise.reject(abortedError(signal));
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(abortedError(signal));
     signal.addEventListener("abort", onAbort, { once: true });
@@ -635,6 +641,8 @@ export function createClient<S extends SchemaMeta, Records>(
     run: (manifest: Manifest, ctx: FetchContext) => Promise<T>,
   ): Promise<T> => {
     const attempt = async (manifest: Manifest): Promise<T> => {
+      // The signal can fire while the manifest resolves; don't start fetches for a cancelled query.
+      if (signal?.aborted) throw abortedError(signal);
       const ctx = makeFetchContext(basePath, fetchImpl, signal);
       try {
         return await raceAbort(run(manifest, ctx), signal);
