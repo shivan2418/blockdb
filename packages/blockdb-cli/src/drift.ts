@@ -125,6 +125,9 @@ function kindProblem(name: string, field: FieldConfig, value: unknown, record: n
       `A multi-valued field is either "multi": true (which needs "indexed": true) or, if you don't query it, "kind": "json".`
     );
   }
+  if (typeof value === "number" && field.kind === "number" && !Number.isFinite(value)) {
+    return `"${name}" is declared kind "number", but record ${record} has ${value}, which JSON can't store (it would be written as null).`;
+  }
   if (typeof value === expectedTypeof(field.kind)) return undefined;
   return `"${name}" is declared kind "${field.kind}", but record ${record} has a ${typeof value} value (${JSON.stringify(value)}).`;
 }

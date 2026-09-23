@@ -232,9 +232,11 @@ function coerceCsvValue(raw: string, fieldName: string, kind: FieldKind | undefi
   if (raw === "") return undefined;
   if (kind === "number") {
     const value = Number(raw);
-    if (Number.isNaN(value)) {
+    // "Infinity" and "1e999" parse, but JSON has no Infinity: the block would store null, and the
+    // manifest would depend on whether the sort spilled to disk before or after that happened.
+    if (!Number.isFinite(value)) {
       throw new Error(
-        `blockdb: input field "${fieldName}" is declared kind "number" but CSV/TSV cell "${raw}" isn't a valid number`,
+        `blockdb: input field "${fieldName}" is declared kind "number" but CSV/TSV cell "${raw}" isn't a finite number`,
       );
     }
     return value;

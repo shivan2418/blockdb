@@ -236,6 +236,15 @@ describe("readInputRecords — csv/tsv", () => {
     ).toThrow(/year.*number/i);
   });
 
+  test("fails loud on a number-kind cell that parses to Infinity, which JSON would store as null", () => {
+    for (const cell of ["Infinity", "-Infinity", "1e999"]) {
+      writeFileSync(path.join(tmpDir, "movies.csv"), `year,title,rating\n${cell},The Matrix,8.7\n`);
+      expect(() =>
+        readInputRecords(path.join(tmpDir, "movies.csv"), { format: "csv", delimiter: ",", fields: FIELDS }),
+      ).toThrow(/year.*isn't a finite number/i);
+    }
+  });
+
   test("an empty cell is treated as an absent field, not coerced to NaN/empty-string", () => {
     writeFileSync(path.join(tmpDir, "movies.csv"), "year,title,rating\n1999,The Matrix,\n");
     const records = readInputRecords(path.join(tmpDir, "movies.csv"), {

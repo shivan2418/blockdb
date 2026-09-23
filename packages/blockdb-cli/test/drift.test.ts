@@ -23,6 +23,11 @@ describe("assertNoSchemaDrift", () => {
     expect(() => assertNoSchemaDrift(records, fields)).not.toThrow();
   });
 
+  test("a non-finite number drifts: JSON can't store it", () => {
+    expect(() => assertNoSchemaDrift([{ year: Infinity }], fields)).toThrow(/"year" is declared kind "number", but record 0 has Infinity/);
+    expect(() => assertNoSchemaDrift([{ year: Number.NaN }], fields)).toThrow(/record 0 has NaN/);
+  });
+
   test("a missing key fails unless the field is absent, since the generated type says it's always there", () => {
     expect(() => assertNoSchemaDrift([{ year: 1999, genres: [] }], strict)).toThrow(/Add "absent": true to:\n  - "title" \(has no key in 1 record, first record 0\)/);
     expect(() => assertNoSchemaDrift([{ year: 1999 }], fields)).not.toThrow();
