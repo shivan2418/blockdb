@@ -19,6 +19,12 @@ const cliRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const distBuild = path.join(cliRoot, "dist", "build.js");
 const distInit = path.join(cliRoot, "dist", "init.js");
 
+/**
+ * Locally, a checkout that hasn't run `pnpm build` skips these. CI builds first, so there a missing
+ * `dist/` is a broken pipeline and fails instead of skipping without anyone noticing.
+ */
+const skipWithoutDist = (file: string) => !existsSync(file) && !process.env.CI;
+
 const RECORDS = 150_000;
 /** ~36 MB of NDJSON: the pre-streaming build runs out of memory on it at this heap size; the streaming one fits in half. */
 const HEAP_MB = 48;
@@ -67,7 +73,7 @@ afterAll(() => {
 });
 
 describe("build and init memory (#28, #29)", () => {
-  test.skipIf(!existsSync(distBuild))(
+  test.skipIf(skipWithoutDist(distBuild))(
     `builds ${RECORDS.toLocaleString("en-US")} records inside a ${HEAP_MB} MB heap`,
     () => {
       const script = `
@@ -88,7 +94,7 @@ describe("build and init memory (#28, #29)", () => {
     60_000,
   );
 
-  test.skipIf(!existsSync(distInit))(
+  test.skipIf(skipWithoutDist(distInit))(
     `init infers ${RECORDS.toLocaleString("en-US")} records inside a ${HEAP_MB} MB heap`,
     () => {
       // Inference streams too: it keeps counts per field, never the records (#29).
