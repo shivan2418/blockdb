@@ -140,13 +140,28 @@ describe("findMany/count/get take a caller signal", () => {
   });
 
   test("a cancelled query doesn't take the stale-manifest retry (#32)", async () => {
-    const host = slowHost([".ndjson"]);
+    // The block answers 404 once the query is cancelled: the DEPLOY_INTEGRITY a stale manifest would
+    // raise, arriving after the abort. The query must still end as ABORTED, with no manifest refetch.
+    const manifestUrls: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("manifest.json")) {
+        manifestUrls.push(url);
+        return ok(JSON.stringify(manifest));
+      }
+      return new Promise<Response>((resolve) => {
+        init?.signal?.addEventListener("abort", () => resolve({ ok: false, status: 404, json: async () => ({}), text: async () => "" } as Response), {
+          once: true,
+        });
+      });
+    }) as typeof fetch;
     const controller = new AbortController();
-    const query = connect(host.fetchImpl).movies.findMany({ where: { year: { gte: 1999 } }, signal: controller.signal });
+    const query = connect(fetchImpl).movies.findMany({ where: { year: { gte: 1999 } }, signal: controller.signal });
     await tick();
     controller.abort();
-    await caught(query);
-    expect(host.requests.filter((r) => r.url.endsWith("manifest.json"))).toHaveLength(1);
+    expect((await caught(query)).code).toBe("ABORTED");
+    await tick();
+    expect(manifestUrls).toHaveLength(1);
   });
 
   test("get and count take the signal too", async () => {
