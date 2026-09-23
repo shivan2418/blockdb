@@ -200,7 +200,7 @@ type RiderOp = "not" | "isNull" | "isAbsent" | "exists";
 type PruningOp<F extends FieldMeta> = F extends { pruning: infer P extends readonly string[] }
   ? P[number]
   : Exclude<F["operators"][number], RiderOp>;
-/** A list field's `some`/`every` prune through their element filter; `hasEvery` and `isEmpty` always do. */
+/** A list field's `some`/`every` prune through their element filter; `hasEvery` and `isEmpty` do by name (their values are checked at runtime, by `wherePrunes`). */
 type ElementPrunes<E, F extends FieldMeta> = E extends object
   ? Extract<keyof E, PruningOp<F>> extends never ? false : true
   : "equals" extends PruningOp<F> ? true : false;
@@ -239,12 +239,22 @@ function elementPrunes(elementFilter: unknown, pruning: readonly string[]): bool
 }
 
 /**
- * Whether one operator actually reaches an index structure. `contains` routes on the trigrams of its
- * argument, so one shorter than three characters has none and can't prune even on a trigram field.
+ * Whether one operator, with this value, narrows which blocks are read. A pruning operator can still
+ * match everything: `contains` routes on the trigrams of its argument, so one shorter than three
+ * characters has none, and an empty `startsWith`/`endsWith` is a prefix of every value.
  */
 function filterOpPrunes(op: string, value: unknown, pruning: readonly string[]): boolean {
-  if (!pruning.includes(op)) return false;
-  return !(op === "contains" && typeof value === "string" && value.length < 3);
+  if (value === undefined || !pruning.includes(op)) return false;
+  if (op === "contains") return typeof value === "string" && value.length >= 3;
+  if (op === "startsWith" || op === "endsWith") return typeof value === "string" && value.length > 0;
+  return true;
+}
+
+/** A list field's `hasEvery`/`isEmpty`: an empty `hasEvery` and `isEmpty: false` match every block. */
+function listOpPrunes(op: string, value: unknown): boolean {
+  if (op === "hasEvery") return Array.isArray(value) && value.length > 0;
+  if (op === "isEmpty") return value === true;
+  return false;
 }
 
 /**
@@ -293,8 +303,9 @@ type PruningSchema = { fields: Record<string, { operators: readonly string[]; pr
  * and fall back (add a sort-field range, say) instead of catching the error. Pass the collection's
  * `getSchema()`. An empty or missing `where` counts as pruning, since it is allowed.
  *
- * The one rule the types can't see: `contains` prunes only with 3 or more characters. A shorter
- * needle has no trigram to look up, so it rides even on a field opted into `contains`.
+ * The rules the types can't see, because they depend on the value: `contains` prunes only with 3 or
+ * more characters (a shorter needle has no trigram to look up), and an empty `startsWith`/`endsWith`,
+ * an empty `hasEvery` and `isEmpty: false` match every block. Each of these rides.
  */
 export function wherePrunes(where: Record<string, Record<string, unknown> | undefined> | undefined, schema: PruningSchema): boolean {
   const entries = Object.entries(compactWhere(where) ?? {});
@@ -306,7 +317,7 @@ export function wherePrunes(where: Record<string, Record<string, unknown> | unde
     const pruning = pruningOpsOf(meta);
     return Object.entries(filter ?? {}).some(([op, value]) => {
       if (meta.multi) {
-        if (op === "hasEvery" || op === "isEmpty") return true;
+        if (op === "hasEvery" || op === "isEmpty") return listOpPrunes(op, value);
         if (op === "some" || op === "every") return elementPrunes(value, pruning);
         return false;
       }
@@ -315,15 +326,28 @@ export function wherePrunes(where: Record<string, Record<string, unknown> | unde
   });
 }
 
-/** Whether any filter in `where` (or a list field's element filter) is a `contains` too short to prune. */
-function hasShortContains(where: Record<string, Record<string, unknown> | undefined>): boolean {
-  const short = (filter: unknown): boolean =>
-    typeof filter === "object" &&
-    filter !== null &&
-    Object.entries(filter).some(
-      ([op, value]) => (op === "contains" && typeof value === "string" && value.length < 3) || ((op === "some" || op === "every") && short(value)),
-    );
-  return Object.values(where).some(short);
+/**
+ * Why a pruning operator in `where` (or in a list field's element filter) still rides, given its value:
+ * the notes NEEDS_PRUNING appends. The operator names are right in these cases, so without the note
+ * the error would look wrong.
+ */
+function valueRiderNotes(where: Record<string, Record<string, unknown>>): string[] {
+  let shortContains = false;
+  let matchesAll = false;
+  const visit = (filter: unknown): void => {
+    if (typeof filter !== "object" || filter === null) return;
+    for (const [op, value] of Object.entries(filter)) {
+      if (op === "contains" && typeof value === "string" && value.length < 3) shortContains = true;
+      if ((op === "startsWith" || op === "endsWith") && value === "") matchesAll = true;
+      if ((op === "hasEvery" && Array.isArray(value) && value.length === 0) || (op === "isEmpty" && value === false)) matchesAll = true;
+      if (op === "some" || op === "every") visit(value);
+    }
+  };
+  Object.values(where).forEach(visit);
+  const notes: string[] = [];
+  if (shortContains) notes.push(" A `contains` needs at least 3 characters to use its trigram index; a shorter one is a rider.");
+  if (matchesAll) notes.push(" An empty `startsWith` or `endsWith`, an empty `hasEvery` and `isEmpty: false` match every block, so they are riders too.");
+  return notes;
 }
 
 /**
@@ -347,9 +371,7 @@ export function assertWhereHasPruning(
       `so the query would read the whole dataset. Add a filter on the sort field "${schema.sortField}"` +
       (prunable.length > 0 ? ` or on an indexed field (${prunable.join(", ")})` : "") +
       `.` +
-      (hasShortContains(where!)
-        ? ` A \`contains\` needs at least 3 characters to use its trigram index; a shorter one is a rider.`
-        : "") +
+      valueRiderNotes(compactWhere(where) ?? {}).join("") +
       ` Check with wherePrunes() before querying. See "Riders" in docs/query-guide.md.`,
   });
 }

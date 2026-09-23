@@ -128,7 +128,7 @@ await db.books.findMany({ where: { inStock: { equals: true } } }); // ✗ only a
 await db.books.count({ inStock: { equals: true } });               // ✓ an upper bound, no download
 ```
 
-**Checking a `where` built from UI input.** The compiler can't see one rule: `contains` prunes only with **3 or more characters**, because a shorter needle has no trigram to look up. So `{ title_fold: { contains: "ab" } }` type-checks, then throws `NEEDS_PRUNING` at runtime if nothing else in the `where` prunes. To fall back instead of catching the error, ask `wherePrunes` first. It applies exactly the rule `findMany` enforces:
+**Checking a `where` built from UI input.** The compiler can't see the rules that depend on a value. `contains` prunes only with **3 or more characters**, because a shorter needle has no trigram to look up. An empty `startsWith` or `endsWith`, an empty `hasEvery` and `isEmpty: false` match every block, so they ride too. So `{ title_fold: { contains: "ab" } }` or `{ tags: { hasEvery: [] } }` (no chip selected) type-checks, then throws `NEEDS_PRUNING` at runtime if nothing else in the `where` prunes. To fall back instead of catching the error, ask `wherePrunes` first. It applies exactly the rule `findMany` enforces:
 
 ```ts
 import { normalize, wherePrunes } from "blockdb";
@@ -152,10 +152,10 @@ A filter or operator set to `undefined` is left out, the same as if it weren't w
 |---|---|---|
 | Sort field, number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` | all but `not` |
 | Sort field, string | the same, plus `startsWith` `endsWith` `contains` | all but `not` `endsWith` `contains` |
-| String | `equals` `in` `startsWith` `endsWith` `contains` `not` | if indexed: `equals` `in` `startsWith`, plus `endsWith` / `contains` if opted in (`contains` with 3+ characters) |
+| String | `equals` `in` `startsWith` `endsWith` `contains` `not` | if indexed: `equals` `in` `startsWith`, plus `endsWith` / `contains` if opted in (`contains` with 3+ characters; an empty `startsWith` / `endsWith` rides) |
 | Number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` | if indexed: all but `not` |
 | Boolean | `equals` `not` | if indexed: `equals` |
-| List (`"multi": true`, always indexed) | `some` `every` `hasEvery` `isEmpty` | all |
+| List (`"multi": true`, always indexed) | `some` `every` `hasEvery` `isEmpty` | `some` / `every` through their element filter, `hasEvery` with at least one value, `isEmpty: true` |
 | Not a list or the sort field, with `"nullable": true` | also `isNull` `exists` | none |
 | Not a list or the sort field, with `"absent": true` | also `isAbsent` `exists` | none |
 

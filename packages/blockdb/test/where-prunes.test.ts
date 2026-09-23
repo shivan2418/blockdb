@@ -32,6 +32,23 @@ describe("wherePrunes", () => {
     expect(wherePrunes({ tags: { some: { contains: "abc" } } }, collection)).toBe(true);
   });
 
+  test("a pruning operator whose value matches every block rides", () => {
+    expect(wherePrunes({ name: { startsWith: "" } }, collection)).toBe(false);
+    expect(wherePrunes({ name: { startsWith: "B" } }, collection)).toBe(true);
+    expect(wherePrunes({ year: { equals: undefined } }, collection)).toBe(true); // compacts to the empty where
+    expect(wherePrunes({ year: { equals: undefined }, note: { equals: "x" } }, collection)).toBe(false);
+    expect(wherePrunes({ tags: { hasEvery: [] } }, collection)).toBe(false);
+    expect(wherePrunes({ tags: { hasEvery: ["a"] } }, collection)).toBe(true);
+    expect(wherePrunes({ tags: { isEmpty: false } }, collection)).toBe(false);
+    expect(wherePrunes({ tags: { isEmpty: true } }, collection)).toBe(true);
+    expect(wherePrunes({ tags: { some: { startsWith: "" } } }, collection)).toBe(false);
+    expect(wherePrunes({ tags: { some: { not: "a" } } }, collection)).toBe(false);
+  });
+
+  test("NEEDS_PRUNING says why an empty value rides", () => {
+    expect(() => assertWhereHasPruning({ tags: { hasEvery: [] } }, withSortField)).toThrow(/an empty `hasEvery` and `isEmpty: false` match every block/);
+  });
+
   test("an empty or missing where is allowed, so it counts as pruning", () => {
     expect(wherePrunes(undefined, collection)).toBe(true);
     expect(wherePrunes({}, collection)).toBe(true);
