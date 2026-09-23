@@ -9,7 +9,8 @@
  *
  * - `CONFIG` — manifest.json itself 404s / is unreachable (wrong basePath). Not retryable.
  * - `FORMAT_VERSION` — manifest major ≠ runtime major, checked when the manifest loads. Not retryable.
- * - `DEPLOY_INTEGRITY` — a manifest-referenced content-hashed block/chunk/sidecar 404s. Not retryable.
+ * - `DEPLOY_INTEGRITY` — a manifest-referenced content-hashed block/chunk/sidecar 404s, and a freshly
+ *   refetched manifest still names it (the client retries once past a stale cached manifest, #32). Not retryable.
  * - `NETWORK` — fetch rejected, or resolved non-ok non-404; optional `.status`. The one maybe-transient bucket.
  * - `CORRUPT_DATA` — 2xx body won't parse into JSON/NDJSON/domain structure. Not retryable.
  * - `LIMIT_EXCEEDED` — the `maxResults` ceiling (fail-loud, never truncates). Not retryable.

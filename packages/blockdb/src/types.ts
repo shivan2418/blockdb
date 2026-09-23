@@ -357,7 +357,11 @@ export type Collection<C extends CollectionMeta, Rec> = CollectionBase<C, Rec> &
 
 export interface ClientOptions {
   basePath: string;
-  /** Injectable for non-browser / testing; defaults to global `fetch`. */
+  /**
+   * Injectable for non-browser / testing; defaults to global `fetch`. The manifest request passes
+   * `cache: "no-cache"` (and `"reload"` when recovering from a stale one, #32) in its `init`; a
+   * wrapper should forward `init` so the browser sees it.
+   */
   fetch?: typeof fetch;
   /**
    * Client-level result ceiling (default 10_000), a guardrail distinct from

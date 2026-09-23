@@ -15,7 +15,11 @@ configure — only the handful of transport concerns below.
 
 - **`manifest.json`** is the one mutable, stable-named file — the entry point every client fetches
   first. Serve it with a short-lived or revalidating cache policy (e.g. `Cache-Control: no-cache`
-  or a short `max-age`) so a redeploy is picked up promptly.
+  or a short `max-age`) so a redeploy is picked up promptly. The runtime asks for it with
+  `cache: "no-cache"` either way, so the browser revalidates it once per session (a 304 when
+  unchanged). Where a stale copy still gets through (a host like GitHub Pages that caches every file
+  for 10 minutes, a CDN, a caching `fetch` wrapper), a 404 on a file the old manifest names makes the
+  runtime refetch the manifest with `cache: "reload"` and rerun the query once against it.
 - **Everything else** (`blocks/`, `index/`, `zonemaps/`) is content-hash-named and immutable by
   construction — a given filename's bytes never change. Serve these with
   `Cache-Control: public, max-age=31536000, immutable`. A rebuild that doesn't change a block's
@@ -106,10 +110,17 @@ construction (a retry can't fix a wrong `basePath` or a version mismatch).
 
 ## Recovering from `DEPLOY_INTEGRITY`
 
-`DEPLOY_INTEGRITY` means the manifest referenced a block/chunk/sidecar that 404s — almost always an
+`DEPLOY_INTEGRITY` means the manifest referenced a block/chunk/sidecar that 404s, and a manifest
+refetched with `cache: "reload"` still names it — almost always an
 incomplete or half-propagated deploy (a CDN edge that hasn't caught up, or a deploy that uploaded
 `manifest.json` before the files it points to finished uploading). Recovery is: re-run
 `blockdb build` and redeploy the **whole** output tree together, and upload data files before
 (or atomically with) `manifest.json` so a client can never observe a manifest pointing at files
 that aren't there yet. `--no-clean` plus an atomic directory swap on the host avoids this class of
 issue entirely by making the manifest the last thing to become visible.
+
+If the deploy is complete and the error persists, look for a cache that ignores the runtime's
+`cache` mode: a CDN in front of the host, or a custom `fetch` that doesn't forward `init`. A cached
+`index.html` still loads the old bundled client, but that client reads the new manifest, so it keeps
+working unless the new build changed the manifest's compression or blockdb's major version (which
+fail as `CONFIG` or `FORMAT_VERSION` rather than `DEPLOY_INTEGRITY`).

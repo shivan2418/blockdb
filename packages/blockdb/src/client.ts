@@ -2,7 +2,7 @@ import { fetchIndexChunk } from "./index-fetch.js";
 import { BlockDbError } from "./errors.js";
 import { parseCorruptible } from "./fetch-file.js";
 import { matchesWhere } from "./filter.js";
-import { datasetCompression, fetchManifest, type IndexChunkDirEntry, type IndexDescriptor, type Manifest, type PairZonemapEntry } from "./manifest.js";
+import { datasetCompression, fetchManifest, manifestReferences, type IndexChunkDirEntry, type IndexDescriptor, type Manifest, type PairZonemapEntry } from "./manifest.js";
 import {
   chunksForFilter,
   decodeIndexChunk,
@@ -544,24 +544,69 @@ export function createClient<S extends SchemaMeta, Records>(
   const basePath = opts.basePath.replace(/\/+$/, "");
   const fetchImpl = opts.fetch ?? fetch;
   const maxResults = opts.maxResults ?? DEFAULT_MAX_RESULTS;
+  const manifestCompression = opts.manifestCompression ?? (opts.manifestGzip === true ? "gzip" : "none");
   let manifestPromise: Promise<Manifest> | undefined;
-  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl, opts.manifestCompression ?? (opts.manifestGzip === true ? "gzip" : "none")));
+  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl, manifestCompression));
+
+  // The one in-flight (or finished) refetch, keyed by the manifest it replaces. Every query that
+  // failed against that same stale manifest shares it, so a burst of concurrent queries after a
+  // redeploy costs one manifest request, not one each.
+  let refresh: { stale: Manifest; promise: Promise<Manifest> } | undefined;
+  const refreshManifest = (stale: Manifest): Promise<Manifest> => {
+    if (refresh?.stale === stale) return refresh.promise;
+    const promise = fetchManifest(basePath, fetchImpl, manifestCompression, "reload").then(
+      (fresh) => {
+        manifestPromise = Promise.resolve(fresh);
+        return fresh;
+      },
+      (error: unknown) => {
+        // A failed refetch isn't remembered: the next failing query tries again.
+        if (refresh?.promise === promise) refresh = undefined;
+        throw error;
+      },
+    );
+    refresh = { stale, promise };
+    return promise;
+  };
+
+  /**
+   * Runs one query against the manifest, recovering once from a stale cached manifest (#32).
+   *
+   * Content-hashed files never go stale, but the manifest's name is the same across deploys, and a
+   * host that caches it (despite the `no-cache` revalidation, e.g. a CDN or a caching fetch wrapper)
+   * can hand back the previous deploy's copy, which names files the new deploy removed. So a
+   * DEPLOY_INTEGRITY 404 refetches the manifest with `cache: "reload"`. If the fresh manifest no
+   * longer names the missing file it replaces the cached one and the query reruns once against it
+   * (index chunks and sidecars are cached per query, so there is nothing else to drop). If it still
+   * names the file, that's a real partial deploy and the original error is thrown. A second
+   * failure on the rerun throws as-is: the retry is bounded at one, so it can never loop.
+   */
+  const withManifest = async <T>(run: (manifest: Manifest) => Promise<T>): Promise<T> => {
+    const manifest = await getManifest();
+    try {
+      return await run(manifest);
+    } catch (error) {
+      if (!(error instanceof BlockDbError) || error.code !== "DEPLOY_INTEGRITY" || error.url === undefined) throw error;
+      // A refetch that itself fails (a 5xx, a FORMAT_VERSION from a newer build) throws its own,
+      // more telling, error.
+      const fresh = await refreshManifest(manifest);
+      if (manifestReferences(fresh, basePath, error.url)) throw error;
+      return await run(fresh);
+    }
+  };
 
   const makeCollection = (meta: CollectionMeta) => {
     const collection: Record<string, unknown> = {
       findMany: async (args?: RawFindManyArgs) => {
         assertLimitWithinCeiling(args?.limit, maxResults);
-        const manifest = await getManifest();
-        // After the manifest (which says what prunes on this dataset), before any index or block fetch.
-        assertWhereHasPruning(args?.where, manifest.schema);
-        const ctx = makeFetchContext(basePath, fetchImpl);
-        return executeFindMany(manifest, ctx, args, maxResults);
+        return withManifest((manifest) => {
+          // After the manifest (which says what prunes on this dataset), before any index or block fetch.
+          assertWhereHasPruning(args?.where, manifest.schema);
+          return executeFindMany(manifest, makeFetchContext(basePath, fetchImpl), args, maxResults);
+        });
       },
-      count: async (where?: Record<string, Record<string, unknown>>) => {
-        const manifest = await getManifest();
-        const ctx = makeFetchContext(basePath, fetchImpl);
-        return executeCount(manifest, ctx, where);
-      },
+      count: async (where?: Record<string, Record<string, unknown>>) =>
+        withManifest((manifest) => executeCount(manifest, makeFetchContext(basePath, fetchImpl), where)),
       getSchema: () => meta,
     };
 
@@ -572,9 +617,9 @@ export function createClient<S extends SchemaMeta, Records>(
     if (meta.pk !== undefined) {
       const pkField = meta.pk;
       collection.get = async (id: unknown) => {
-        const manifest = await getManifest();
-        const ctx = makeFetchContext(basePath, fetchImpl);
-        const { records } = await executeFindMany(manifest, ctx, { where: { [pkField]: { equals: id } }, limit: 1 }, maxResults);
+        const { records } = await withManifest((manifest) =>
+          executeFindMany(manifest, makeFetchContext(basePath, fetchImpl), { where: { [pkField]: { equals: id } }, limit: 1 }, maxResults),
+        );
         return records[0] ?? null;
       };
     }

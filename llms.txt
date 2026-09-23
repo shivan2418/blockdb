@@ -41,7 +41,7 @@ const { records, hasMore } = await db.movies.findMany({
 
 - [Package & CLI public contract](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0005-package-and-cli-contract.md): the two-package split, lockstep versioning, the `init`/`build`/`inspect` commands, flag-equivalence (`init --yes`), the committed `blockdb.config.json` (flags > config > inferred defaults), the two outputs, and the version compatibility handshake.
 - [Codegen & typed client](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0004-codegen-and-typed-client.md): how the runtime and the generated per-dataset facade blend; what `createClient` / the generated `connect()` emit.
-- [Runtime failure contract](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0007-runtime-failure-contract.md): `BlockDbError` / `BlockDbErrorCode`, partial-failure semantics, and the fail-loud major-version mismatch at `connect()`.
+- [Runtime failure contract](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0007-runtime-failure-contract.md): `BlockDbError` / `BlockDbErrorCode`, partial-failure semantics, the fail-loud major-version mismatch at `connect()`, and the one retry: a 404 on a file the manifest names refetches the manifest (`cache: "reload"`) and reruns the query once if the manifest changed, so a stale cached manifest after a redeploy recovers on its own.
 
 ## Data format
 

@@ -1,5 +1,6 @@
 import { BlockDbError } from "./errors.js";
 import { compressionSuffix, decompressionFormat, type Compression } from "./types.js";
+import { blockRelPath } from "./block-fetch.js";
 import { fetchCompressedText, fetchJson, parseCorruptible } from "./fetch-file.js";
 import { FORMAT_VERSION } from "./version.js";
 
@@ -116,19 +117,25 @@ export interface Manifest {
  * this is the bootstrap fetch: nothing has been read yet that could tell the client the encoding. The
  * generated client carries the answer instead, stamped by the same `build` that wrote the file, so the
  * two cannot drift.
+ *
+ * `cache` defaults to `"no-cache"` (#32): the manifest is the one stable-named file, and a host that
+ * caches everything for minutes (GitHub Pages sends `max-age=600`) would otherwise hand back the
+ * previous deploy's copy after a redeploy. Revalidating costs a 304 when nothing changed. The client
+ * passes `"reload"` when a referenced file 404s and it needs to know what the deploy says now.
  */
 export async function fetchManifest(
   basePath: string,
   fetchImpl: typeof fetch,
   compression: Compression = "none",
+  cache: RequestCache = "no-cache",
 ): Promise<Manifest> {
   const url = `${basePath}/manifest.json${compressionSuffix(compression)}`;
   const format = decompressionFormat(compression);
   let parsed: Manifest;
   if (format === undefined) {
-    parsed = (await fetchJson(url, "manifest", fetchImpl)) as Manifest;
+    parsed = (await fetchJson(url, "manifest", fetchImpl, undefined, cache)) as Manifest;
   } else {
-    const text = await fetchCompressedText(url, "manifest", format, fetchImpl);
+    const text = await fetchCompressedText(url, "manifest", format, fetchImpl, undefined, cache);
     parsed = parseCorruptible(url, () => JSON.parse(text) as Manifest);
   }
   // JSON-valid but not a manifest — the body "won't parse" into one (ADR-0007 §5).
@@ -169,4 +176,26 @@ export async function fetchManifest(
  */
 export function datasetCompression(manifest: Manifest): Compression {
   return manifest.dataset.compression ?? (manifest.dataset.gzip === true ? "gzip" : "none");
+}
+
+/**
+ * Whether `manifest` points at `url` — a block, an index chunk (base, reversed or trigram) or a
+ * zonemap sidecar. The client asks this of a freshly fetched manifest after a referenced file 404s
+ * (#32): if the fresh manifest still names the file the deploy really is missing it, and if not, the
+ * 404 came from a stale manifest and the query is worth one retry.
+ */
+export function manifestReferences(manifest: Manifest, basePath: string, url: string): boolean {
+  const prefix = `${basePath}/`;
+  if (!url.startsWith(prefix)) return false;
+  const path = url.slice(prefix.length);
+
+  const compression = datasetCompression(manifest);
+  if (manifest.blocks.some((block) => blockRelPath(block.hash, manifest.blocks.length, compression) === path)) return true;
+
+  for (const index of Object.values(manifest.indexes)) {
+    const directories = [index.chunks, index.reversed?.chunks ?? [], index.trigram?.chunks ?? []];
+    if (directories.some((chunks) => chunks.some((chunk) => chunk.file === path))) return true;
+  }
+
+  return Object.values(manifest.zonemap).some((entry) => "sidecar" in entry && entry.sidecar === path);
 }

@@ -22,7 +22,7 @@ Any single failed fetch **aborts the whole query and throws**. A `findMany` retu
 
 ### 2. No built-in retry, backoff, or timeout
 
-The runtime does **zero** retrying. A failed fetch fails the query immediately (§1). Retry, backoff, timeouts, auth headers, and circuit-breaking all belong to the **injected `fetch`** (ADR-0004) or the CDN in front of the static files. Rationale: keeps the zero-dep runtime tiny; retry policy is genuinely host- and app-specific; and the injected-`fetch` seam is the documented extension point for it. The deploy-guidance doc ships a "wrap `fetch` to add retry" snippet.
+The runtime does **zero** retrying. A failed fetch fails the query immediately (§1). *(Amended 2026-09-23, #32: one exception, which retries a stale manifest rather than a transient failure. `manifest.json` is the one stable-named file, and a host that caches everything (GitHub Pages sends `max-age=600` and allows no headers) can serve the previous deploy's copy, which names files the new deploy removed. So the manifest is fetched with `cache: "no-cache"`, and a `DEPLOY_INTEGRITY` 404 refetches it once with `cache: "reload"`. If the fresh manifest no longer names the missing file, it replaces the cached one and the query reruns once. If it still names it, the original error is thrown. Concurrent queries failing on the same stale manifest share one refetch; a failed refetch throws its own error (`NETWORK`, `CONFIG`, `FORMAT_VERSION`). The rerun is never retried, so this can't loop, and §1 still holds: the query returns a complete result from one manifest or throws.)* Retry, backoff, timeouts, auth headers, and circuit-breaking all belong to the **injected `fetch`** (ADR-0004) or the CDN in front of the static files. Rationale: keeps the zero-dep runtime tiny; retry policy is genuinely host- and app-specific; and the injected-`fetch` seam is the documented extension point for it. The deploy-guidance doc ships a "wrap `fetch` to add retry" snippet.
 
 ### 3. What counts as a fetch failure
 
@@ -40,7 +40,7 @@ Every failure maps to exactly one code — as fine-grained as the caller's *reac
 |---|---|---|
 | `CONFIG` | `manifest.json` itself 404s / unreachable — wrong `basePath` | no |
 | `FORMAT_VERSION` | manifest major ≠ runtime major (ADR-0005) | no |
-| `DEPLOY_INTEGRITY` | a manifest-*referenced* content-hashed shard/chunk/sidecar 404s / is missing | no |
+| `DEPLOY_INTEGRITY` | a manifest-*referenced* content-hashed shard/chunk/sidecar 404s / is missing *(Amended 2026-09-23, #32: and a refetched manifest still names it; see §2)* | no |
 | `NETWORK` | `fetch` rejected, **or** resolved non-ok non-404 (500/403/429/…); optional `.status` | maybe |
 | `CORRUPT_DATA` | fetch resolved 2xx but the body won't parse / decompress (bad JSON·NDJSON·encoding) | no |
 | `LIMIT_EXCEEDED` | the `maxResults` ceiling (ADR-0004) | no |

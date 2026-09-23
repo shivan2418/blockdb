@@ -17,19 +17,24 @@ export type FetchedFileKind = "manifest" | "referenced";
 function messageFor404(kind: FetchedFileKind, url: string): string {
   return kind === "manifest"
     ? `blockdb: no manifest.json at "${url}" (HTTP 404) — check basePath: it must point at the deployed dataset root. If the dataset was never deployed there, re-run \`blockdb build\` and deploy the output.`
-    : `blockdb: "${url}" referenced by the manifest returned HTTP 404 — the deploy is incomplete or corrupt. Re-run \`blockdb build\` and redeploy.`;
+    : `blockdb: "${url}" referenced by the manifest returned HTTP 404 — the deploy is incomplete or corrupt, or a stale cache (a CDN, a fetch wrapper, or an old index.html / bundled client) is still serving an earlier deploy's manifest. If the deploy is complete, wait for caches to expire or hard-reload; otherwise re-run \`blockdb build\` and redeploy the whole output.`;
 }
 
-/** Fetches `url`, mapping rejection / !ok to the right BlockDbError code. Resolves only on 2xx. */
+/**
+ * Fetches `url`, mapping rejection / !ok to the right BlockDbError code. Resolves only on 2xx.
+ * `cache` is set only for the manifest (#32); content-hashed files leave it off so the browser's
+ * normal (forever-valid) caching applies, and their `init` stays exactly `{ signal }`.
+ */
 async function fetchOk(
   url: string,
   kind: FetchedFileKind,
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
+  cache?: RequestCache,
 ): Promise<Response> {
   let response: Response;
   try {
-    response = await fetchImpl(url, { signal });
+    response = await fetchImpl(url, cache === undefined ? { signal } : { signal, cache });
   } catch (cause) {
     throw new BlockDbError({
       code: "NETWORK",
@@ -61,8 +66,9 @@ export async function fetchJson(
   kind: FetchedFileKind,
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
+  cache?: RequestCache,
 ): Promise<unknown> {
-  const response = await fetchOk(url, kind, fetchImpl, signal);
+  const response = await fetchOk(url, kind, fetchImpl, signal, cache);
   try {
     return await response.json();
   } catch (cause) {
@@ -144,8 +150,9 @@ export async function fetchCompressedText(
   format: "gzip" | "brotli",
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
+  cache?: RequestCache,
 ): Promise<string> {
-  const response = await fetchOk(url, kind, fetchImpl, signal);
+  const response = await fetchOk(url, kind, fetchImpl, signal, cache);
   if (alreadyDecodedByTransport(response, format)) return await readText(response, url);
   try {
     // Cast: TypeScript's DOM lib still types CompressionFormat as gzip/deflate/deflate-raw, though
