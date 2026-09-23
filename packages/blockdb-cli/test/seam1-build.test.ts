@@ -557,6 +557,54 @@ void check;
   });
 });
 
+describe("seam #1 — json fields in the generated schema (0.3.0 regression)", () => {
+  test("an absent json field type-checks: missing-value operators only, never orderable", () => {
+    const records = Array.from({ length: 20 }, (_, i) => ({
+      id: i,
+      name: `n${i}`,
+      ...(i % 2 === 0 ? { images: { small: `s${i}.png` } } : {}),
+    }));
+    writeFileSync(path.join(tmpDir, "things.ndjson"), records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const jsonConfig: BlockDbConfig = {
+      collection: "things",
+      input: { path: "things.ndjson" },
+      schema: {
+        sortField: "id",
+        fields: { id: { kind: "number" }, name: { kind: "string" }, images: { kind: "json", absent: true } },
+      },
+    };
+    const { clientOutDir } = build(jsonConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const schemaTs = readFileSync(path.join(clientOutDir, "schema.ts"), "utf8");
+    expect(schemaTs).toContain('images: { kind: "json", operators: ["isAbsent", "exists"], pruning: [], absent: true }');
+
+    assertConsumerCompiles(
+      clientOutDir,
+      `
+import type { OrderByOf, WhereOf } from "blockdb";
+import { connect } from "./client.js";
+import type { Schema } from "./schema.js";
+const db = connect();
+
+const where: WhereOf<Schema["things"]> = { images: { exists: true } };
+const order: OrderByOf<Schema["things"]> = { name: "asc" };
+void where;
+void order;
+
+async function check() {
+  await db.things.findMany({ where: { id: { lt: 10 }, images: { isAbsent: true } } });
+  // @ts-expect-error — a json field has no value operators
+  await db.things.findMany({ where: { id: { lt: 10 }, images: { equals: {} } } });
+  // @ts-expect-error — an object has no order
+  await db.things.findMany({ where: { id: { lt: 10 } }, orderBy: { images: "asc" } });
+  // @ts-expect-error — a rider alone
+  await db.things.findMany({ where: { images: { exists: true } } });
+}
+void check;
+`,
+    );
+  });
+});
+
 describe("seam #1 — input formats & record selectors (T9)", () => {
   let baseline: ReturnType<typeof build>;
 

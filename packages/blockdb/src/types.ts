@@ -26,7 +26,12 @@ export function decompressionFormat(compression: Compression): "gzip" | "brotli"
 // generated facade (schema.ts + client.ts, emitted by blockdb-cli) only
 // narrows this generic surface to named, go-to-definition collections.
 
-export type FieldKind = "string" | "number" | "date" | "boolean";
+/**
+ * `json` is a payload-only field (an object, or a list of objects): no value operators and no
+ * ordering, but a field marked `absent`/`nullable` still gets the missing-value operators (ADR-0012),
+ * which is why codegen emits it into the schema at all.
+ */
+export type FieldKind = "string" | "number" | "date" | "boolean" | "json";
 
 export interface FieldMeta {
   readonly kind: FieldKind;
@@ -154,16 +159,21 @@ type FilterFor<F extends FieldMeta> = F extends { kind: "string"; multi: true }
         ? PickOps<AllDateOps & MissingValueOps, F["operators"][number]>
         : F extends { kind: "boolean" }
           ? PickOps<AllBoolOps & MissingValueOps, F["operators"][number]>
-          : never;
+          : F extends { kind: "json" }
+            ? PickOps<MissingValueOps, F["operators"][number]>
+            : never;
 
 /** The where type: every queryable field, each with ONLY its valid operators. */
 export type WhereOf<C extends CollectionMeta> = {
   [K in keyof C["fields"]]?: FilterFor<C["fields"][K]>;
 };
 
-/** orderBy over every queryable field — sorting happens in memory, so an index doesn't matter (ADR-0013). */
+/**
+ * orderBy over every queryable field — sorting happens in memory, so an index doesn't matter
+ * (ADR-0013). Not `json` fields: an object has no order.
+ */
 export type OrderByOf<C extends CollectionMeta> = {
-  [K in keyof C["fields"]]?: "asc" | "desc";
+  [K in keyof C["fields"] as C["fields"][K]["kind"] extends "json" ? never : K]?: "asc" | "desc";
 };
 
 // ---------------------------------------------------------------------------
