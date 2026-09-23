@@ -11,8 +11,8 @@
       "id": { "kind": "string" },
       "title": { "kind": "string", "indexed": true, "contains": true },
       "year": { "kind": "number" },
-      "rating": { "kind": "number", "indexed": true },
-      "director": { "kind": "string", "indexed": true },
+      "rating": { "kind": "number" },
+      "director": { "kind": "string" },
       "genres": { "kind": "string", "indexed": true, "multi": true },
       "overview": { "kind": "string" }
     }
