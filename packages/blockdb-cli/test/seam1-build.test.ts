@@ -1445,6 +1445,30 @@ describe("seam #1 — init --yes → build (T10)", () => {
     expect(readdirSync(path.dirname(outputDir)).filter((name) => name.includes("blockdb-partial"))).toEqual([]);
   });
 
+  test("a build that fails after writing blocks cleans up its staging directory too", () => {
+    writeProducts(tmpDir);
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    init({ cwd: tmpDir, configPath, yes: true, fullScan: true, inputPath: "products.ndjson" });
+    const { outputDir } = build(loadConfigFile(configPath), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const manifestBefore = readFileSync(path.join(outputDir, "manifest.json"), "utf8");
+
+    // Fails once indexing starts, like a full disk would: by then the staging tree holds blocks.
+    const staging = path.join(path.dirname(outputDir), `.${path.basename(outputDir)}.blockdb-partial`);
+    let stagedBlocks = 0;
+    const failWhileIndexing = (event: { phase: string }) => {
+      if (!event.phase.startsWith("indexing")) return;
+      stagedBlocks = readdirSync(path.join(staging, "blocks")).length;
+      throw new Error("ENOSPC: no space left on device");
+    };
+    expect(() =>
+      build(loadConfigFile(configPath), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0, onProgress: failWhileIndexing }),
+    ).toThrow(/ENOSPC/);
+
+    expect(stagedBlocks).toBeGreaterThan(0);
+    expect(existsSync(staging)).toBe(false);
+    expect(readFileSync(path.join(outputDir, "manifest.json"), "utf8")).toBe(manifestBefore);
+  });
+
   test("--reinfer refreshes the baked schema after the data's shape changes", () => {
     writeProducts(tmpDir);
     const configPath = path.join(tmpDir, "blockdb.config.json");
