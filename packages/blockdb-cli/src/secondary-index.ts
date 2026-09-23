@@ -1,4 +1,4 @@
-import type { FieldKind, PairZonemapEntry } from "./types.js";
+import type { FieldConfig, FieldKind, PairZonemapEntry } from "./types.js";
 
 const DEFAULT_TRUNCATE_LEN = 12;
 
@@ -57,31 +57,41 @@ function compareByKind(a: unknown, b: unknown, kind: FieldKind): number {
   return (a as string) < (b as string) ? -1 : (a as string) > (b as string) ? 1 : 0;
 }
 
-/** Per-block [min,max] over `field`, ordinal-aligned with `groups` (ADR-0002 §7 / ADR-0003 §2, §9). */
+/** One block's [min,max] over `field` — its entry in the field's zonemap (ADR-0002 §7 / ADR-0003 §2, §9). */
+function zonemapPairOf(
+  records: Record<string, unknown>[],
+  field: string,
+  kind: FieldKind,
+  multi = false,
+): [unknown, unknown] {
+  let min: unknown;
+  let max: unknown;
+  for (const record of records) {
+    for (const value of valuesOf(record, field, multi)) {
+      if (value === null || value === undefined) continue;
+      if (min === undefined || compareByKind(value, min, kind) < 0) min = value;
+      if (max === undefined || compareByKind(value, max, kind) > 0) max = value;
+    }
+  }
+  // A block can hold zero non-null values for an absentable field (T7) — no bound to compute or truncate.
+  if (min === undefined) return [undefined, undefined];
+  if (kind === "string") {
+    return [truncateStringLower(min as string), truncateStringUpper(max as string)];
+  }
+  return [min, max];
+}
+
+/** Per-block [min,max] over `field`, ordinal-aligned with `groups`. */
 export function computeSecondaryZonemap(
   groups: Record<string, unknown>[][],
   field: string,
   kind: FieldKind,
   multi = false,
 ): PairZonemapEntry {
-  const pairs: [unknown, unknown][] = groups.map((group) => {
-    let min: unknown;
-    let max: unknown;
-    for (const record of group) {
-      for (const value of valuesOf(record, field, multi)) {
-        if (value === null || value === undefined) continue;
-        if (min === undefined || compareByKind(value, min, kind) < 0) min = value;
-        if (max === undefined || compareByKind(value, max, kind) > 0) max = value;
-      }
-    }
-    // A block can hold zero non-null values for an absentable field (T7) — no bound to compute or truncate.
-    if (min === undefined) return [undefined, undefined];
-    if (kind === "string") {
-      return [truncateStringLower(min as string), truncateStringUpper(max as string)];
-    }
-    return [min, max];
-  });
+  return zonemapEntry(groups.map((group) => zonemapPairOf(group, field, kind, multi)), kind);
+}
 
+function zonemapEntry(pairs: [unknown, unknown][], kind: FieldKind): PairZonemapEntry {
   return kind === "string" ? { pairs, truncated: true } : { pairs };
 }
 
@@ -109,28 +119,58 @@ interface DictEntry {
   blockIndices: number[];
 }
 
-function collectDistinctValues(
-  groups: Record<string, unknown>[][],
-  field: string,
-  kind: FieldKind,
-  multi = false,
-): DictEntry[] {
-  const byKey = new Map<string, DictEntry>();
-  groups.forEach((group, blockIndex) => {
-    for (const record of group) {
-      for (const value of valuesOf(record, field, multi)) {
-        if (value === null || value === undefined) continue;
-        const key = canonicalKey(value, kind);
-        let entry = byKey.get(key);
-        if (!entry) {
-          entry = { value, key, blockIndices: [] };
-          byKey.set(key, entry);
-        }
-        if (entry.blockIndices[entry.blockIndices.length - 1] !== blockIndex) entry.blockIndices.push(blockIndex);
-      }
+/**
+ * Distinct keys → the ascending block ordinals holding them: the in-memory form of one index, built
+ * up one block at a time. It grows with distinct values × postings, never with record count.
+ */
+class PostingsDictionary {
+  private readonly byKey = new Map<string, DictEntry>();
+
+  /** Notes that `blockIndex` holds `value` (canonical form `key`). Blocks must arrive in ascending order. */
+  add(key: string, value: unknown, blockIndex: number): void {
+    let entry = this.byKey.get(key);
+    if (!entry) {
+      entry = { value, key, blockIndices: [] };
+      this.byKey.set(key, entry);
     }
-  });
-  return [...byKey.values()].sort((a, b) => compareByKind(a.value, b.value, kind));
+    if (entry.blockIndices[entry.blockIndices.length - 1] !== blockIndex) entry.blockIndices.push(blockIndex);
+  }
+
+  /** Every entry in value order, ready to chunk. */
+  sorted(kind: FieldKind): DictEntry[] {
+    return [...this.byKey.values()].sort((a, b) => compareByKind(a.value, b.value, kind));
+  }
+}
+
+/** Adds one block's values of `field` to its base (inverted) index dictionary. */
+function addValues(dict: PostingsDictionary, records: Record<string, unknown>[], blockIndex: number, field: string, kind: FieldKind, multi: boolean): void {
+  for (const record of records) {
+    for (const value of valuesOf(record, field, multi)) {
+      if (value === null || value === undefined) continue;
+      dict.add(canonicalKey(value, kind), value, blockIndex);
+    }
+  }
+}
+
+/** Adds one block's values of `field`, each reversed, to its `endsWith` dictionary (ADR-0003 §7). */
+function addReversedValues(dict: PostingsDictionary, records: Record<string, unknown>[], blockIndex: number, field: string, multi: boolean): void {
+  for (const record of records) {
+    for (const value of valuesOf(record, field, multi)) {
+      if (value === null || value === undefined) continue;
+      const reversed = reverseString(value as string);
+      dict.add(reversed, reversed, blockIndex);
+    }
+  }
+}
+
+/** Adds every trigram of one block's values of `field` to its `contains` dictionary (ADR-0003 §7). */
+function addTrigrams(dict: PostingsDictionary, records: Record<string, unknown>[], blockIndex: number, field: string, multi: boolean): void {
+  for (const record of records) {
+    for (const value of valuesOf(record, field, multi)) {
+      if (value === null || value === undefined) continue;
+      for (const gram of trigramsOf(value as string)) dict.add(gram, gram, blockIndex);
+    }
+  }
 }
 
 function encodeEntry(entry: DictEntry, prevKey: string): IndexChunkEntry {
@@ -192,6 +232,13 @@ function buildChunksFromDictionary(distinct: DictEntry[], chunkBytes: number): B
   return chunks;
 }
 
+/** Every sliding 3-char window of `value` — the dictionary keys of a trigram index. */
+function trigramsOf(value: string): string[] {
+  const grams: string[] = [];
+  for (let i = 0; i <= value.length - 3; i++) grams.push(value.slice(i, i + 3));
+  return grams;
+}
+
 /**
  * Builds the chunked inverted index for one non-sort indexed field (ADR-0003):
  * distinct values sorted, front-coded within each chunk (so a chunk decodes
@@ -205,7 +252,9 @@ export function buildInvertedIndex(
   chunkBytes: number,
   multi = false,
 ): BuiltIndexChunk[] {
-  return buildChunksFromDictionary(collectDistinctValues(groups, field, kind, multi), chunkBytes);
+  const dict = new PostingsDictionary();
+  groups.forEach((group, blockIndex) => addValues(dict, group, blockIndex, field, kind, multi));
+  return buildChunksFromDictionary(dict.sorted(kind), chunkBytes);
 }
 
 /**
@@ -220,41 +269,9 @@ export function buildReversedIndex(
   chunkBytes: number,
   multi = false,
 ): BuiltIndexChunk[] {
-  const reversedGroups = groups.map((group) =>
-    group.flatMap((record) =>
-      valuesOf(record, field, multi)
-        .filter((value): value is string => value !== null && value !== undefined)
-        .map((value) => ({ [field]: reverseString(value) })),
-    ),
-  );
-  return buildInvertedIndex(reversedGroups, field, "string", chunkBytes);
-}
-
-/** Every sliding 3-char window of `value` — the dictionary keys of a trigram index. */
-function trigramsOf(value: string): string[] {
-  const grams: string[] = [];
-  for (let i = 0; i <= value.length - 3; i++) grams.push(value.slice(i, i + 3));
-  return grams;
-}
-
-function collectDistinctTrigrams(groups: Record<string, unknown>[][], field: string, multi = false): DictEntry[] {
-  const byKey = new Map<string, DictEntry>();
-  groups.forEach((group, blockIndex) => {
-    for (const record of group) {
-      for (const value of valuesOf(record, field, multi)) {
-        if (value === null || value === undefined) continue;
-        for (const gram of trigramsOf(value as string)) {
-          let entry = byKey.get(gram);
-          if (!entry) {
-            entry = { value: gram, key: gram, blockIndices: [] };
-            byKey.set(gram, entry);
-          }
-          if (entry.blockIndices[entry.blockIndices.length - 1] !== blockIndex) entry.blockIndices.push(blockIndex);
-        }
-      }
-    }
-  });
-  return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const dict = new PostingsDictionary();
+  groups.forEach((group, blockIndex) => addReversedValues(dict, group, blockIndex, field, multi));
+  return buildChunksFromDictionary(dict.sorted("string"), chunkBytes);
 }
 
 /**
@@ -269,7 +286,9 @@ export function buildTrigramIndex(
   chunkBytes: number,
   multi = false,
 ): BuiltIndexChunk[] {
-  return buildChunksFromDictionary(collectDistinctTrigrams(groups, field, multi), chunkBytes);
+  const dict = new PostingsDictionary();
+  groups.forEach((group, blockIndex) => addTrigrams(dict, group, blockIndex, field, multi));
+  return buildChunksFromDictionary(dict.sorted("string"), chunkBytes);
 }
 
 /**
@@ -299,22 +318,90 @@ export function meanPostingsLength(chunks: BuiltIndexChunk[]): number | undefine
 export function emptyListBlocks(groups: Record<string, unknown>[][], field: string): number[] {
   const ordinals: number[] = [];
   groups.forEach((group, ordinal) => {
-    if (group.some((record) => Array.isArray(record[field]) && (record[field] as unknown[]).length === 0)) {
-      ordinals.push(ordinal);
-    }
+    if (holdsEmptyList(group, field)) ordinals.push(ordinal);
   });
   return ordinals;
 }
 
+function holdsEmptyList(records: Record<string, unknown>[], field: string): boolean {
+  return records.some((record) => Array.isArray(record[field]) && (record[field] as unknown[]).length === 0);
+}
+
 /** Total UTF-8 bytes of the field's raw (non-null) string values — the "size of the column" ADR-0003 §7 warns against exceeding. */
 export function computeColumnBytes(groups: Record<string, unknown>[][], field: string, multi = false): number {
+  return groups.reduce((sum, group) => sum + columnBytesOf(group, field, multi), 0);
+}
+
+function columnBytesOf(records: Record<string, unknown>[], field: string, multi: boolean): number {
   let bytes = 0;
-  for (const group of groups) {
-    for (const record of group) {
-      for (const value of valuesOf(record, field, multi)) {
-        if (typeof value === "string") bytes += Buffer.byteLength(value, "utf8");
-      }
+  for (const record of records) {
+    for (const value of valuesOf(record, field, multi)) {
+      if (typeof value === "string") bytes += Buffer.byteLength(value, "utf8");
     }
   }
   return bytes;
+}
+
+/** Everything one secondary indexed field's structures need, finished once the last block is in. */
+export interface FieldIndexResult {
+  zonemap: PairZonemapEntry;
+  chunks: BuiltIndexChunk[];
+  /** `endsWith` only. */
+  reversedChunks?: BuiltIndexChunk[];
+  /** `contains` only. */
+  trigramChunks?: BuiltIndexChunk[];
+  /** List fields only: the blocks holding a present `[]` (ADR-0010 §4). */
+  emptyBlocks?: number[];
+  /** `contains` only: the raw column's bytes, which the trigram index is judged against (ADR-0003 §7). */
+  columnBytes?: number;
+}
+
+/**
+ * Builds every structure for one secondary indexed field — zonemap, base index, and the `endsWith`/
+ * `contains` opt-ins — one block at a time, so `build` can drop each block once it's been read (#28).
+ * The same code backs the whole-dataset `computeSecondaryZonemap`/`build*Index` functions above, so the
+ * streamed and in-memory forms can't drift apart.
+ */
+export class FieldIndexer {
+  private readonly multi: boolean;
+  private readonly pairs: [unknown, unknown][] = [];
+  private readonly base = new PostingsDictionary();
+  private readonly reversed: PostingsDictionary | undefined;
+  private readonly trigrams: PostingsDictionary | undefined;
+  private readonly emptyBlocks: number[] | undefined;
+  private columnBytes = 0;
+
+  constructor(
+    private readonly name: string,
+    private readonly field: FieldConfig,
+  ) {
+    this.multi = field.multi === true;
+    this.reversed = field.endsWith ? new PostingsDictionary() : undefined;
+    this.trigrams = field.contains ? new PostingsDictionary() : undefined;
+    this.emptyBlocks = this.multi ? [] : undefined;
+  }
+
+  addBlock(blockIndex: number, records: Record<string, unknown>[]): void {
+    const { name, field, multi } = this;
+    this.pairs.push(zonemapPairOf(records, name, field.kind, multi));
+    addValues(this.base, records, blockIndex, name, field.kind, multi);
+    if (this.reversed) addReversedValues(this.reversed, records, blockIndex, name, multi);
+    if (this.trigrams) {
+      addTrigrams(this.trigrams, records, blockIndex, name, multi);
+      this.columnBytes += columnBytesOf(records, name, multi);
+    }
+    if (this.emptyBlocks && holdsEmptyList(records, name)) this.emptyBlocks.push(blockIndex);
+  }
+
+  finish(chunkBytes: number): FieldIndexResult {
+    return {
+      zonemap: zonemapEntry(this.pairs, this.field.kind),
+      chunks: buildChunksFromDictionary(this.base.sorted(this.field.kind), chunkBytes),
+      ...(this.reversed ? { reversedChunks: buildChunksFromDictionary(this.reversed.sorted("string"), chunkBytes) } : {}),
+      ...(this.trigrams
+        ? { trigramChunks: buildChunksFromDictionary(this.trigrams.sorted("string"), chunkBytes), columnBytes: this.columnBytes }
+        : {}),
+      ...(this.emptyBlocks ? { emptyBlocks: this.emptyBlocks } : {}),
+    };
+  }
 }

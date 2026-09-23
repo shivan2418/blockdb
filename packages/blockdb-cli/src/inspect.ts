@@ -10,11 +10,11 @@ import {
   type IndexSizeEstimate,
   type QueryCostEstimate,
 } from "./estimator.js";
-import { readInputRecords } from "./input.js";
+import { iterateInputRecords } from "./input.js";
 import { valuesOf } from "./secondary-index.js";
 import { blockRelPath } from "./block.js";
 import type { IndexChunkDirEntry, Manifest } from "./types.js";
-import { lowCardinalitySortFieldWarning, oversizedRecordWarning, skewedBlocksWarning, sortFieldCardinalityOf } from "./warnings.js";
+import { lowCardinalitySortFieldWarning, oversizedRecordWarning, skewedBlocksWarning } from "./warnings.js";
 
 export interface InspectOptions {
   /** Absolute path to a `blockdb.config.json` — materializes the served tree in memory from the (unbuilt) input and reports it exactly, without ever writing `output`. */
@@ -169,43 +169,39 @@ function inspectConfig(configPath: string): InspectReport {
   const config = loadConfigFile(configPath);
   const resolved = resolveConfig(config, path.dirname(configPath));
 
-  const records = readInputRecords(resolved.inputPath, {
+  const records = iterateInputRecords(resolved.inputPath, {
     format: resolved.inputFormat,
     delimiter: resolved.inputDelimiter,
     recordsPath: resolved.inputRecordsPath,
     fields: resolved.fields,
   });
 
-  const { manifest, indexFiles } = materialize(resolved, records);
+  // Streams like `build`, but keeps only the index files this report reads back — never the blocks.
+  const chunkContent = new Map<string, string>();
+  const { manifest, stats } = materialize(resolved, records, {
+    block: () => {},
+    file: (relPath, content) => chunkContent.set(relPath, content),
+  });
   const manifestJson = JSON.stringify(manifest); // same serialization `build` writes to disk (build.ts)
 
-  const chunkContent = new Map(indexFiles.map((f) => [f.relPath, f.content]));
   const readChunk = (relPath: string): string => {
     const content = chunkContent.get(relPath);
     if (content === undefined) throw new Error(`blockdb: inspect — missing in-memory index chunk "${relPath}"`);
     return content;
   };
-  const columnBytesFor = (field: string, multi: boolean): number => {
-    let bytes = 0;
-    for (const record of records) {
-      for (const value of valuesOf(record, field, multi)) {
-        if (typeof value === "string") bytes += Buffer.byteLength(value, "utf8");
-      }
-    }
+  const columnBytesFor = (field: string): number => {
+    const bytes = stats.columnBytes[field];
+    if (bytes === undefined) throw new Error(`blockdb: inspect — no column size measured for "${field}"`);
     return bytes;
   };
 
   const structural = buildStructuralReport({ manifest, manifestJson, readChunk, columnBytesFor });
 
   const warnings = [...structural.warnings];
-  const cardinalityWarning = lowCardinalitySortFieldWarning(
-    manifest.dataset.recordCount,
-    sortFieldCardinalityOf(records, resolved.sortField),
-  );
+  const cardinalityWarning = lowCardinalitySortFieldWarning(manifest.dataset.recordCount, stats.sortFieldCardinality);
   if (cardinalityWarning) warnings.push(cardinalityWarning);
 
-  const maxRecordBytes = records.reduce((max, r) => Math.max(max, Buffer.byteLength(JSON.stringify(r), "utf8")), 0);
-  const oversizedWarning = oversizedRecordWarning(maxRecordBytes, resolved.blockBytes);
+  const oversizedWarning = oversizedRecordWarning(stats.maxRecordBytes, resolved.blockBytes);
   if (oversizedWarning) warnings.push(oversizedWarning);
 
   return {

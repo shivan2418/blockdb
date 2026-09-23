@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { assertNoSchemaDrift } from "../src/drift.js";
+import { assertNoSchemaDrift, SchemaDriftChecker } from "../src/drift.js";
 import type { FieldConfig } from "../src/types.js";
 
 // Every key may be missing here, so each kind-drift test can use a record holding just the field it's about.
@@ -102,4 +102,21 @@ describe("assertNoSchemaDrift", () => {
     expect(() => assertNoSchemaDrift([{ year: "1999" }], fields)).toThrow(/"blockdb init --reinfer"/);
     expect(() => assertNoSchemaDrift([{ genres: "Action" }], fields)).toThrow(/"blockdb init --reinfer"/);
   });
+
+  test("lists drifting fields in config order, whatever order the records reveal them in", () => {
+    // Record 0 reveals "title", record 1 reveals "year" — the report still reads year, then title.
+    const records = [
+      { year: 1999, genres: [] },
+      { title: "T", genres: [] },
+    ];
+    expect(() => assertNoSchemaDrift(records, strict)).toThrow(/Add "absent": true to:\n  - "year" .*\n  - "title"/);
+  });
+
+  test("the streaming checker reports nothing until finish, then everything at once", () => {
+    const checker = new SchemaDriftChecker(strict);
+    expect(() => checker.check({ year: "1999", genres: [] })).not.toThrow();
+    expect(() => checker.check({ year: 2000, title: null, genres: [] })).not.toThrow();
+    expect(() => checker.finish()).toThrow(/"title".*\n[\s\S]*"nullable": true to:\n  - "title"[\s\S]*"year" is declared kind "number"/);
+  });
 });
+

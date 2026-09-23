@@ -18,53 +18,71 @@ export function blockRelPath(hash: string, blockCount: number, compression: Comp
   return blockCount > HASH_PREFIX_THRESHOLD ? `blocks/${hash.slice(0, HASH_PREFIX_LEN)}/${filename}` : `blocks/${filename}`;
 }
 
+export interface BlockFile extends BlockDescriptor {
+  content: string;
+}
+
+/** A closed block: its file, and the records it holds (for the indexers to read before it's dropped). */
+export interface CutBlock {
+  file: BlockFile;
+  records: Record<string, unknown>[];
+}
+
 /**
- * Cuts records (already globally sorted by `sortField`) into byte-target
- * blocks. Equal-key runs are kept contiguous even when that means a block
- * exceeds the target — otherwise the sort field's zonemap ranges could
- * overlap between adjacent blocks (ADR-0002).
+ * Cuts records (already globally sorted by `sortField`) into byte-target blocks, one record at a
+ * time, handing each block to `onBlock` as it closes — so only the open block is ever held (#28).
+ * Equal-key runs are kept contiguous even when that means a block exceeds the target — otherwise
+ * the sort field's zonemap ranges could overlap between adjacent blocks (ADR-0002).
  */
+export class BlockCutter {
+  private records: Record<string, unknown>[] = [];
+  private lines: string[] = [];
+  private bytes = 0;
+
+  constructor(
+    private readonly sortField: string,
+    private readonly targetBytes: number,
+    private readonly onBlock: (block: CutBlock) => void,
+  ) {}
+
+  /** Adds the next record in sort order; `line` is its serialization (`JSON.stringify(record)`). */
+  add(record: Record<string, unknown>, line: string): void {
+    const lineBytes = Buffer.byteLength(line, "utf8") + 1; // + newline
+    const open = this.records.length > 0;
+    const wouldExceed = open && this.bytes + lineBytes > this.targetBytes;
+    const sameKeyAsLast = open && this.records[this.records.length - 1]![this.sortField] === record[this.sortField];
+    if (wouldExceed && !sameKeyAsLast) this.close();
+
+    this.records.push(record);
+    this.lines.push(line);
+    this.bytes += lineBytes;
+  }
+
+  /** Closes the last, partial block. Call once after the last `add`. */
+  finish(): void {
+    if (this.records.length > 0) this.close();
+  }
+
+  private close(): void {
+    const content = this.lines.join("\n") + "\n";
+    const file: BlockFile = { hash: contentHash(content), bytes: this.bytes, count: this.records.length, content };
+    const records = this.records;
+    this.records = [];
+    this.lines = [];
+    this.bytes = 0;
+    this.onBlock({ file, records });
+  }
+}
+
+/** `BlockCutter` over records already in memory, returning just the record groups. */
 export function cutIntoBlocks(
   records: Record<string, unknown>[],
   sortField: string,
   targetBytes: number,
 ): Record<string, unknown>[][] {
   const blocks: Record<string, unknown>[][] = [];
-  let current: Record<string, unknown>[] = [];
-  let currentBytes = 0;
-
-  for (const record of records) {
-    const lineBytes = Buffer.byteLength(JSON.stringify(record), "utf8") + 1; // + newline
-    const wouldExceed = current.length > 0 && currentBytes + lineBytes > targetBytes;
-    const sameKeyAsLast = current.length > 0 && current[current.length - 1]![sortField] === record[sortField];
-
-    if (wouldExceed && !sameKeyAsLast) {
-      blocks.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-
-    current.push(record);
-    currentBytes += lineBytes;
-  }
-  if (current.length > 0) blocks.push(current);
-
+  const cutter = new BlockCutter(sortField, targetBytes, (block) => blocks.push(block.records));
+  for (const record of records) cutter.add(record, JSON.stringify(record));
+  cutter.finish();
   return blocks;
-}
-
-export interface BlockFile extends BlockDescriptor {
-  content: string;
-}
-
-/** Serializes each block group to newline-terminated NDJSON and content-hashes it. */
-export function materializeBlocks(groups: Record<string, unknown>[][]): BlockFile[] {
-  return groups.map((group) => {
-    const content = group.map((record) => JSON.stringify(record)).join("\n") + "\n";
-    return {
-      hash: contentHash(content),
-      bytes: Buffer.byteLength(content, "utf8"),
-      count: group.length,
-      content,
-    };
-  });
 }

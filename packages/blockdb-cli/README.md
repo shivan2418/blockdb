@@ -26,7 +26,7 @@ Every wizard choice is also a CLI flag (nothing wizard-only), so `init --yes` wi
 
 ### Inference reads everything by default
 
-`init` decides the baked schema, and a schema that is wrong about your data is the expensive kind of wrong: a value union missing a value that first appears at row 40,000, a field absent from the first 1000 rows, a cardinality that misprices an index or picks the wrong sort field. So `init` reads the whole input. `build` already does, so this asks for no memory a build doesn't.
+`init` decides the baked schema, and a schema that is wrong about your data is the expensive kind of wrong: a value union missing a value that first appears at row 40,000, a field absent from the first 1000 rows, a cardinality that misprices an index or picks the wrong sort field. So `init` reads the whole input, and holds it in memory while it infers. `build` streams instead, so its memory stays flat however large the input; on an input too big to hold, run `init` with `--sample`.
 
 Pass `--sample` (or `--sample-size <n>`) for a fast look at a large file. It is a real speed/accuracy trade and it is opt-in, not the default.
 

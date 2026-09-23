@@ -1,4 +1,4 @@
-import { closeSync, mkdtempSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readSync, rmSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export type SortKind = "number" | "date" | "string";
@@ -63,21 +63,47 @@ export function compareRecordsForSort(
   return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
 }
 
+/**
+ * One record on its way through the sort, carried with its serialized line. Serializing once lets the
+ * canonical tie-break compare two precomputed strings instead of `JSON.stringify`-ing both records on
+ * every comparison, and the same line is what gets spilled to a run file and, later, written into a
+ * block — so a record's bytes are fixed exactly once.
+ */
+export interface SortItem {
+  record: Record<string, unknown>;
+  /** `JSON.stringify(record)`. */
+  line: string;
+}
+
+/** `compareRecordsForSort`, with the full-record tie-break read off the precomputed lines. */
+function compareItems(a: SortItem, b: SortItem, sortField: string, kind: SortKind, pk?: string): number {
+  const primary = compareSortValues(a.record[sortField], b.record[sortField], kind);
+  if (primary !== 0) return primary;
+  if (pk !== undefined) {
+    const pkCompare = compareTiebreak(a.record[pk], b.record[pk]);
+    if (pkCompare !== 0) return pkCompare;
+  }
+  return a.line < b.line ? -1 : a.line > b.line ? 1 : 0;
+}
+
 export interface ExternalSortOptions {
   sortField: string;
   kind: SortKind;
   pk?: string;
-  /** Records buffered per sorted run before spilling to disk; a source at or under this size sorts purely in memory. */
+  /** Records buffered per sorted run before spilling to disk; a source at or under this size (and `runBytes`) sorts purely in memory. */
   runRecords: number;
-  /** Scratch directory external sort creates a run-file subdirectory under; removed before returning. */
+  /**
+   * Serialized bytes buffered per sorted run before spilling, whichever limit comes first. A record
+   * count alone doesn't bound memory: 200,000 records of 5 KB each is a gigabyte of lines, plus the
+   * parsed objects beside them. Default `DEFAULT_RUN_BYTES`.
+   */
+  runBytes?: number;
+  /** Scratch directory external sort creates a run-file subdirectory under; removed by `close`. */
   tmpDir: string;
 }
 
-function writeRun(dir: string, index: number, run: Record<string, unknown>[]): string {
-  const filePath = path.join(dir, `run-${index}.ndjson`);
-  writeFileSync(filePath, run.map((record) => JSON.stringify(record)).join("\n") + "\n");
-  return filePath;
-}
+/** 64 MiB of serialized records per run — a few hundred MB of heap once the parsed objects are counted. */
+export const DEFAULT_RUN_BYTES = 64 * 1024 * 1024;
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -89,91 +115,200 @@ const READ_CHUNK_BYTES = 64 * 1024;
 class RunReader {
   private readonly fd: number;
   private readonly decoder = new TextDecoder("utf-8");
+  private readonly chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES);
   private buffer = "";
   private eof = false;
+  private closed = false;
 
   constructor(filePath: string) {
     this.fd = openSync(filePath, "r");
   }
 
   private fill(): void {
-    const chunk = Buffer.alloc(READ_CHUNK_BYTES);
-    const bytesRead = readSync(this.fd, chunk, 0, READ_CHUNK_BYTES, null);
+    const bytesRead = readSync(this.fd, this.chunk, 0, READ_CHUNK_BYTES, null);
     if (bytesRead === 0) {
       this.eof = true;
       this.buffer += this.decoder.decode(); // flush any trailing partial sequence
-      closeSync(this.fd);
+      this.close();
       return;
     }
-    this.buffer += this.decoder.decode(chunk.subarray(0, bytesRead), { stream: true });
+    this.buffer += this.decoder.decode(this.chunk.subarray(0, bytesRead), { stream: true });
   }
 
-  /** The next parsed record, or `undefined` once the run is exhausted (closing its file descriptor). */
-  next(): Record<string, unknown> | undefined {
+  /** The next record with its line, or `undefined` once the run is exhausted (closing its file descriptor). */
+  next(): SortItem | undefined {
     for (;;) {
       const newlineIdx = this.buffer.indexOf("\n");
       if (newlineIdx !== -1) {
-        const line = this.buffer.slice(0, newlineIdx).trim();
+        const line = this.buffer.slice(0, newlineIdx);
         this.buffer = this.buffer.slice(newlineIdx + 1);
         if (line.length === 0) continue;
-        return JSON.parse(line) as Record<string, unknown>;
+        return { record: JSON.parse(line) as Record<string, unknown>, line };
       }
       if (this.eof) {
-        const line = this.buffer.trim();
+        const line = this.buffer;
         this.buffer = "";
-        return line.length === 0 ? undefined : (JSON.parse(line) as Record<string, unknown>);
+        return line.length === 0 ? undefined : { record: JSON.parse(line) as Record<string, unknown>, line };
       }
       this.fill();
     }
   }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    closeSync(this.fd);
+  }
 }
 
 /**
- * Sorts `source` by `compareRecordsForSort`. A source at or under `runRecords` sorts purely in
- * memory (the common case, and every case in today's build — `readInputRecords` still loads the
- * full input up front). Above that threshold, `externalSort` spills memory-bounded sorted runs to
- * NDJSON temp files under `tmpDir`, then k-way-merges those runs back into the final ordering by
- * reading each run through a small fixed-size buffer (`RunReader`) rather than loading any run's
- * full content at once — so read+sort+merge peaks at O(run count × a small chunk size), not the
- * dataset size (ADR-0002 §9). Block-cutting/indexing downstream still consume the merged result
- * as one in-memory array — a deliberate T13 scope boundary, not attempted here.
+ * A binary min-heap over the runs' current heads. Picking the next record is O(log runs) rather than
+ * a linear scan of every head — at 130M records over ~650 runs, the difference between ~1.3B and ~85B
+ * comparisons.
  */
-export function externalSort(
-  source: Record<string, unknown>[],
-  opts: ExternalSortOptions,
-): Record<string, unknown>[] {
-  const compare = (a: Record<string, unknown>, b: Record<string, unknown>): number =>
-    compareRecordsForSort(a, b, opts.sortField, opts.kind, opts.pk);
+class RunHeap {
+  private readonly heap: { item: SortItem; reader: RunReader }[] = [];
 
-  if (source.length <= opts.runRecords) {
-    return [...source].sort(compare);
+  constructor(private readonly compare: (a: SortItem, b: SortItem) => number) {}
+
+  get size(): number {
+    return this.heap.length;
   }
 
-  const scratchDir = mkdtempSync(path.join(opts.tmpDir, "blockdb-sort-"));
-  try {
-    const runFiles: string[] = [];
-    for (let start = 0; start < source.length; start += opts.runRecords) {
-      const run = source.slice(start, start + opts.runRecords).sort(compare);
-      runFiles.push(writeRun(scratchDir, runFiles.length, run));
+  push(item: SortItem, reader: RunReader): void {
+    const heap = this.heap;
+    heap.push({ item, reader });
+    let i = heap.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (this.compare(heap[i]!.item, heap[parent]!.item) >= 0) break;
+      [heap[i], heap[parent]] = [heap[parent]!, heap[i]!];
+      i = parent;
     }
+  }
 
-    const readers: RunReader[] = runFiles.map((filePath) => new RunReader(filePath));
-    const heads: (Record<string, unknown> | undefined)[] = readers.map((reader) => reader.next());
-
-    const merged: Record<string, unknown>[] = [];
+  /** Removes the smallest head, refilling from its run, and returns it. */
+  pop(): SortItem {
+    const heap = this.heap;
+    const top = heap[0]!;
+    const next = top.reader.next();
+    if (next !== undefined) {
+      heap[0] = { item: next, reader: top.reader };
+    } else {
+      const last = heap.pop()!;
+      if (heap.length === 0) return top.item;
+      heap[0] = last;
+    }
+    let i = 0;
     for (;;) {
-      let bestIdx = -1;
-      for (let i = 0; i < heads.length; i++) {
-        const head = heads[i];
-        if (head === undefined) continue;
-        if (bestIdx === -1 || compare(head, heads[bestIdx]!) < 0) bestIdx = i;
-      }
-      if (bestIdx === -1) break;
-      merged.push(heads[bestIdx]!);
-      heads[bestIdx] = readers[bestIdx]!.next();
+      const left = 2 * i + 1;
+      const right = left + 1;
+      let smallest = i;
+      if (left < heap.length && this.compare(heap[left]!.item, heap[smallest]!.item) < 0) smallest = left;
+      if (right < heap.length && this.compare(heap[right]!.item, heap[smallest]!.item) < 0) smallest = right;
+      if (smallest === i) break;
+      [heap[i], heap[smallest]] = [heap[smallest]!, heap[i]!];
+      i = smallest;
     }
-    return merged;
+    return top.item;
+  }
+}
+
+/**
+ * Sorts records by `compareRecordsForSort`, taking them one at a time (ADR-0002 §9, #28). Up to
+ * `runRecords` records or `runBytes` of them are buffered; a source that never exceeds either sorts
+ * purely in memory. Past it, each
+ * full buffer is sorted and spilled to an NDJSON run file under `tmpDir`, and `sorted()` k-way-merges
+ * the runs back through a heap, reading each through a small fixed-size buffer (`RunReader`) — so
+ * memory peaks at one run plus a chunk per run file, never the dataset.
+ *
+ * Call `close` when done (including on failure) to remove the scratch directory.
+ */
+export class ExternalSorter {
+  private buffer: SortItem[] = [];
+  private bufferBytes = 0;
+  private scratchDir: string | undefined;
+  private readonly runFiles: string[] = [];
+  private readers: RunReader[] = [];
+  private count = 0;
+  private readonly compare: (a: SortItem, b: SortItem) => number;
+
+  constructor(private readonly opts: ExternalSortOptions) {
+    this.compare = (a, b) => compareItems(a, b, opts.sortField, opts.kind, opts.pk);
+  }
+
+  /** Records added so far. */
+  get size(): number {
+    return this.count;
+  }
+
+  /** Adds one record. `line` must be `JSON.stringify(record)`; pass it when the caller already has it. */
+  add(record: Record<string, unknown>, line = JSON.stringify(record)): void {
+    this.buffer.push({ record, line });
+    this.bufferBytes += line.length; // string length: near enough to bytes for a memory bound
+    this.count++;
+    if (this.buffer.length >= this.opts.runRecords || this.bufferBytes >= (this.opts.runBytes ?? DEFAULT_RUN_BYTES)) {
+      this.spill();
+    }
+  }
+
+  private spill(): void {
+    this.scratchDir ??= mkdtempSync(path.join(this.opts.tmpDir, "blockdb-sort-"));
+    const run = this.buffer.sort(this.compare);
+    this.buffer = [];
+    this.bufferBytes = 0;
+    const filePath = path.join(this.scratchDir, `run-${this.runFiles.length}.ndjson`);
+    // Written in slices so no single string approaches V8's max length on a run of large records.
+    const fd = openSync(filePath, "w");
+    try {
+      const SLICE = 1000;
+      for (let start = 0; start < run.length; start += SLICE) {
+        const lines = run.slice(start, start + SLICE).map((item) => item.line);
+        writeSync(fd, lines.join("\n") + "\n");
+      }
+    } finally {
+      closeSync(fd);
+    }
+    this.runFiles.push(filePath);
+  }
+
+  /** Every record added, in sort order. Call once, after the last `add`. */
+  *sorted(): Generator<SortItem> {
+    if (this.runFiles.length === 0) {
+      const all = this.buffer.sort(this.compare);
+      this.buffer = [];
+      yield* all;
+      return;
+    }
+    if (this.buffer.length > 0) this.spill();
+
+    this.readers = this.runFiles.map((filePath) => new RunReader(filePath));
+    const heap = new RunHeap(this.compare);
+    for (const reader of this.readers) {
+      const head = reader.next();
+      if (head !== undefined) heap.push(head, reader);
+    }
+    while (heap.size > 0) yield heap.pop();
+  }
+
+  /** Releases run files and their descriptors. Safe to call more than once. */
+  close(): void {
+    for (const reader of this.readers) reader.close();
+    this.readers = [];
+    if (this.scratchDir !== undefined) rmSync(this.scratchDir, { recursive: true, force: true });
+    this.scratchDir = undefined;
+  }
+}
+
+/** `ExternalSorter` over records already in memory, collected back into an array. */
+export function externalSort(source: Record<string, unknown>[], opts: ExternalSortOptions): Record<string, unknown>[] {
+  const sorter = new ExternalSorter(opts);
+  try {
+    for (const record of source) sorter.add(record);
+    const sorted: Record<string, unknown>[] = [];
+    for (const { record } of sorter.sorted()) sorted.push(record);
+    return sorted;
   } finally {
-    rmSync(scratchDir, { recursive: true, force: true });
+    sorter.close();
   }
 }

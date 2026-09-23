@@ -21,69 +21,94 @@ const REINFER_HINT =
  * `null` only appears where the config says it can (`absent`, `nullable`): those flags are what
  * make the generated record type optional or `| null`.
  *
- * Reports every drifting field in one error, grouped by fix, so a data refresh that touched many
- * fields costs one rebuild to diagnose rather than one per field.
+ * Fed one record at a time (`check`), so `build` can stream its input (#28); `finish` then reports
+ * every drifting field in one error, grouped by fix and in config order, so a data refresh that
+ * touched many fields costs one rebuild to diagnose rather than one per field.
  */
-export function assertNoSchemaDrift(records: Record<string, unknown>[], fields: Record<string, FieldConfig>): void {
-  const missingKeys = new Map<string, MissingValueDrift>();
-  const nulls = new Map<string, MissingValueDrift>();
-  const kindProblems: string[] = [];
+export class SchemaDriftChecker {
+  /** Payload-only fields are opaque — any JSON value is valid, and they're always typed optional. */
+  private readonly checked: [string, FieldConfig][];
+  private readonly missingKeys = new Map<string, MissingValueDrift>();
+  private readonly nulls = new Map<string, MissingValueDrift>();
+  /** Only the first kind problem per field: one bad value says what's wrong; a million say nothing more. */
+  private readonly kindProblems = new Map<string, string>();
+  private recordIndex = 0;
 
-  const note = (map: Map<string, MissingValueDrift>, name: string, record: number) => {
-    const seen = map.get(name);
-    if (seen) seen.count++;
-    else map.set(name, { firstRecord: record, count: 1 });
-  };
+  constructor(private readonly fields: Record<string, FieldConfig>) {
+    this.checked = Object.entries(fields).filter(([, field]) => field.kind !== "json");
+  }
 
-  for (const [name, field] of Object.entries(fields)) {
-    // Payload-only fields are opaque — any JSON value is valid, and they're always typed optional.
-    if (field.kind === "json") continue;
-
-    let kindReported = false;
-    for (let i = 0; i < records.length; i++) {
-      const record = records[i]!;
+  check(record: Record<string, unknown>): void {
+    const i = this.recordIndex++;
+    for (const [name, field] of this.checked) {
       if (!Object.prototype.hasOwnProperty.call(record, name)) {
-        if (!field.absent) note(missingKeys, name, i);
+        if (!field.absent) note(this.missingKeys, name, i);
         continue;
       }
       const value = record[name];
       if (value === null) {
-        if (!field.nullable) note(nulls, name, i);
+        if (!field.nullable) note(this.nulls, name, i);
         continue;
       }
-      if (value === undefined || kindReported) continue;
+      if (value === undefined || this.kindProblems.has(name)) continue;
 
       const problem = kindProblem(name, field, value, i);
-      if (problem) {
-        kindProblems.push(problem);
-        kindReported = true;
-      }
+      if (problem) this.kindProblems.set(name, problem);
     }
   }
 
-  if (missingKeys.size === 0 && nulls.size === 0 && kindProblems.length === 0) return;
+  /** Throws the aggregated drift error, if any record so far drifted. */
+  finish(): void {
+    const { missingKeys, nulls, kindProblems } = this;
+    if (missingKeys.size === 0 && nulls.size === 0 && kindProblems.size === 0) return;
 
-  const sections: string[] = [];
-  if (missingKeys.size > 0) {
-    sections.push(
-      `Some records lack a key the config says is always present. Add "absent": true to:\n` +
-        describeMissing(missingKeys, "has no key"),
-    );
+    const sections: string[] = [];
+    if (missingKeys.size > 0) {
+      sections.push(
+        `Some records lack a key the config says is always present. Add "absent": true to:\n` +
+          this.describeMissing(missingKeys, "has no key"),
+      );
+    }
+    if (nulls.size > 0) {
+      sections.push(
+        `Some records hold null where the config says a field is never null. Add "nullable": true to:\n` +
+          this.describeMissing(nulls, "is null"),
+      );
+    }
+    if (kindProblems.size > 0) {
+      const problems = this.inConfigOrder(kindProblems).map(([, problem]) => `  - ${problem}`);
+      sections.push(`Some values no longer match the field's declared kind:\n` + problems.join("\n"));
+    }
+    throw new Error(`blockdb: schema drift — the data no longer matches blockdb.config.json.\n\n${sections.join("\n\n")}\n\n${REINFER_HINT}`);
   }
-  if (nulls.size > 0) {
-    sections.push(
-      `Some records hold null where the config says a field is never null. Add "nullable": true to:\n` +
-        describeMissing(nulls, "is null"),
-    );
+
+  /** Records meet fields in record order, but the report lists them the way the config does. */
+  private inConfigOrder<T>(map: Map<string, T>): [string, T][] {
+    return Object.keys(this.fields)
+      .filter((name) => map.has(name))
+      .map((name) => [name, map.get(name)!]);
   }
-  if (kindProblems.length > 0) {
-    sections.push(`Some values no longer match the field's declared kind:\n` + kindProblems.map((p) => `  - ${p}`).join("\n"));
+
+  private describeMissing(map: Map<string, MissingValueDrift>, what: string): string {
+    return describeMissing(this.inConfigOrder(map), what);
   }
-  throw new Error(`blockdb: schema drift — the data no longer matches blockdb.config.json.\n\n${sections.join("\n\n")}\n\n${REINFER_HINT}`);
 }
 
-function describeMissing(map: Map<string, MissingValueDrift>, what: string): string {
-  return [...map]
+function note(map: Map<string, MissingValueDrift>, name: string, record: number): void {
+  const seen = map.get(name);
+  if (seen) seen.count++;
+  else map.set(name, { firstRecord: record, count: 1 });
+}
+
+/** `SchemaDriftChecker` over records already in memory. */
+export function assertNoSchemaDrift(records: Record<string, unknown>[], fields: Record<string, FieldConfig>): void {
+  const checker = new SchemaDriftChecker(fields);
+  for (const record of records) checker.check(record);
+  checker.finish();
+}
+
+function describeMissing(entries: [string, MissingValueDrift][], what: string): string {
+  return entries
     .map(([name, { firstRecord, count }]) => `  - "${name}" (${what} in ${count} record${count === 1 ? "" : "s"}, first record ${firstRecord})`)
     .join("\n");
 }

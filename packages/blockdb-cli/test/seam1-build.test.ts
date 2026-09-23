@@ -1281,6 +1281,20 @@ describe("seam #1 — init --yes → build (T10)", () => {
     );
   });
 
+  test("a build that fails leaves the previous build's output in place, and no staging directory", () => {
+    writeProducts(tmpDir);
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    init({ cwd: tmpDir, configPath, yes: true, fullScan: true, inputPath: "products.ndjson" });
+    const { outputDir } = build(loadConfigFile(configPath), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const manifestBefore = readFileSync(path.join(outputDir, "manifest.json"), "utf8");
+
+    writeProducts(tmpDir, PRODUCTS.map((p) => ({ ...p, price: String(p.price) })));
+    expect(() => build(loadConfigFile(configPath), { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 })).toThrow(/drift/i);
+
+    expect(readFileSync(path.join(outputDir, "manifest.json"), "utf8")).toBe(manifestBefore);
+    expect(readdirSync(path.dirname(outputDir)).filter((name) => name.includes("blockdb-partial"))).toEqual([]);
+  });
+
   test("--reinfer refreshes the baked schema after the data's shape changes", () => {
     writeProducts(tmpDir);
     const configPath = path.join(tmpDir, "blockdb.config.json");
@@ -1682,6 +1696,9 @@ describe("seam #1 — external sort scale hardening (T13)", () => {
     const firstHash = manifest.blocks[0]!.hash;
     expect(existsSync(path.join(outputDir, "blocks", `${firstHash}.ndjson`))).toBe(false);
     expect(existsSync(path.join(outputDir, "blocks", firstHash.slice(0, 2), `${firstHash}.ndjson`))).toBe(true);
+    // Blocks are written flat while the count is unknown, then moved — none may be left behind.
+    const top = readdirSync(path.join(outputDir, "blocks"), { withFileTypes: true });
+    expect(top.filter((entry) => !entry.isDirectory())).toEqual([]);
   });
 
   test("compression: brotli writes .ndjson.br blocks that decompress, and preserves block hashes", () => {

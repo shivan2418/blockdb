@@ -68,39 +68,78 @@ function operatorsForField(field: FieldConfig, isSortField: boolean, indexed: bo
   return [...SECONDARY_RANGE_KIND_OPERATORS, RIDER_OPERATOR, ...missingValueOperators(field)];
 }
 
-/** N+1 monotonic boundaries: splitPoints[i] = min value of block i; the final entry is the last block's max. */
-export function computeSplitPoints(groups: Record<string, unknown>[][], sortField: string): unknown[] {
-  if (groups.length === 0) return [];
-  const points = groups.map((group) => group[0]![sortField]);
-  const lastGroup = groups[groups.length - 1]!;
-  points.push(lastGroup[lastGroup.length - 1]![sortField]);
-  return points;
-}
-
 /**
- * Locates the contiguous null/absent tail at the high end of the globally sorted records
- * (ADR-0002 §9) and counts the two kinds separately. `undefined` when every record has a real
- * sort-field value.
+ * Everything the manifest needs from the sort field, gathered one block at a time from the globally
+ * sorted stream (#28): the split-points, the null/absent tail, and — free because equal values are
+ * adjacent once sorted — the distinct-value count behind the low-cardinality warning.
  */
-export function computeMissingTail(groups: Record<string, unknown>[][], sortField: string): MissingZonemapInfo | undefined {
-  let nullCount = 0;
-  let absentCount = 0;
-  let blockFrom: number | undefined;
+export class SortFieldTracker {
+  private readonly points: unknown[] = [];
+  private lastValue: unknown;
+  private nullCount = 0;
+  private absentCount = 0;
+  private missingFrom: number | undefined;
+  private distinct = 0;
+  private lastDistinctKey: string | undefined;
 
-  groups.forEach((group, blockIndex) => {
-    for (const record of group) {
-      const value = record[sortField];
+  constructor(private readonly sortField: string) {}
+
+  addBlock(blockIndex: number, records: Record<string, unknown>[]): void {
+    this.points.push(records[0]![this.sortField]);
+    this.lastValue = records[records.length - 1]![this.sortField];
+
+    for (const record of records) {
+      const value = record[this.sortField];
       if (value === null) {
-        nullCount++;
-        if (blockFrom === undefined) blockFrom = blockIndex;
+        this.nullCount++;
+        this.missingFrom ??= blockIndex;
       } else if (value === undefined) {
-        absentCount++;
-        if (blockFrom === undefined) blockFrom = blockIndex;
+        this.absentCount++;
+        this.missingFrom ??= blockIndex;
+      } else {
+        const key = JSON.stringify(value);
+        if (key !== this.lastDistinctKey) {
+          this.distinct++;
+          this.lastDistinctKey = key;
+        }
       }
     }
-  });
+  }
 
-  return blockFrom === undefined ? undefined : { blockFrom, nullCount, absentCount };
+  /** N+1 monotonic boundaries: splitPoints[i] = min value of block i; the final entry is the last block's max. */
+  splitPoints(): unknown[] {
+    return this.points.length === 0 ? [] : [...this.points, this.lastValue];
+  }
+
+  /**
+   * The contiguous null/absent tail at the high end of the globally sorted records (ADR-0002 §9),
+   * with the two kinds counted separately. `undefined` when every record has a real sort-field value.
+   */
+  missingTail(): MissingZonemapInfo | undefined {
+    if (this.missingFrom === undefined) return undefined;
+    return { blockFrom: this.missingFrom, nullCount: this.nullCount, absentCount: this.absentCount };
+  }
+
+  /** Distinct non-missing sort-field values. */
+  cardinality(): number {
+    return this.distinct;
+  }
+}
+
+function trackGroups(groups: Record<string, unknown>[][], sortField: string): SortFieldTracker {
+  const tracker = new SortFieldTracker(sortField);
+  groups.forEach((group, blockIndex) => tracker.addBlock(blockIndex, group));
+  return tracker;
+}
+
+/** `SortFieldTracker.splitPoints` over block groups already in memory. */
+export function computeSplitPoints(groups: Record<string, unknown>[][], sortField: string): unknown[] {
+  return trackGroups(groups, sortField).splitPoints();
+}
+
+/** `SortFieldTracker.missingTail` over block groups already in memory. */
+export function computeMissingTail(groups: Record<string, unknown>[][], sortField: string): MissingZonemapInfo | undefined {
+  return trackGroups(groups, sortField).missingTail();
 }
 
 function buildSchemaDescriptor(config: ResolvedConfig): SchemaDescriptor {

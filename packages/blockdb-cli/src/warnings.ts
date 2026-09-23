@@ -4,12 +4,6 @@ import type { BlockDescriptor, Compression } from "./types.js";
 /** Heuristic average sort-value run length past which a sort field counts as "low cardinality" (ADR-0002 §6) — scale-free, so it works identically whether cardinality came from raw records or block-boundary split-points. Not a hard rule: `cutIntoBlocks` caps real `blockCount` at cardinality (equal-key runs never split), so this can't be phrased as "fewer distinct values than blocks". */
 const LOW_CARDINALITY_AVG_RUN_LENGTH = 20;
 
-/** Distinct non-missing sort-field values across `records` — the raw input to `lowCardinalitySortFieldWarning`, shared by `build.ts` (materialize's own warnings) and `inspect --config`. */
-export function sortFieldCardinalityOf(records: Record<string, unknown>[], sortField: string): number {
-  const values = records.map((r) => r[sortField]).filter((v) => v !== null && v !== undefined);
-  return new Set(values.map((v) => JSON.stringify(v))).size;
-}
-
 /** ADR-0002 §6: a low-cardinality sort field blocks unevenly (every block becomes a single-key pileup). */
 export function lowCardinalitySortFieldWarning(recordCount: number, sortFieldCardinality: number): string | undefined {
   if (sortFieldCardinality === 0 || recordCount < LOW_CARDINALITY_AVG_RUN_LENGTH) return undefined;

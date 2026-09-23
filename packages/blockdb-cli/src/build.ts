@@ -1,37 +1,28 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
 import { resolveConfig } from "./config.js";
 import { generateClientTs, generateSchemaTs } from "./codegen.js";
-import { applyDerivedFields } from "./derive.js";
-import { assertNoSchemaDrift } from "./drift.js";
+import { deriveRecord, derivedFieldsOf } from "./derive.js";
+import { SchemaDriftChecker } from "./drift.js";
 import { contentHash } from "./hash.js";
-import { readInputRecords } from "./input.js";
-import { buildManifest, computeMissingTail, computeSplitPoints } from "./manifest.js";
-import {
-  buildInvertedIndex,
-  buildReversedIndex,
-  buildTrigramIndex,
-  computeColumnBytes,
-  computeSecondaryZonemap,
-  emptyListBlocks,
-  meanPostingsLength,
-} from "./secondary-index.js";
-import { cutIntoBlocks, materializeBlocks, blockRelPath } from "./block.js";
+import { iterateInputRecords } from "./input.js";
+import { buildManifest, SortFieldTracker } from "./manifest.js";
+import { FieldIndexer, meanPostingsLength } from "./secondary-index.js";
+import { BlockCutter, blockRelPath, HASH_PREFIX_THRESHOLD } from "./block.js";
 import type { BlockFile } from "./block.js";
-import { externalSort, type SortKind } from "./sort.js";
+import { ExternalSorter, type SortKind } from "./sort.js";
 import type { OnProgress } from "./progress.js";
 import type { BuiltIndexChunk } from "./secondary-index.js";
 import { compressionSuffix, type Compression } from "./types.js";
-import type { IndexChunkDirEntry, Manifest, PairZonemapEntry, ResolvedConfig, BlockDbConfig } from "./types.js";
+import type { BlockDescriptor, IndexChunkDirEntry, Manifest, PairZonemapEntry, ResolvedConfig, BlockDbConfig } from "./types.js";
 import { getFormatVersion, getGeneratorVersion } from "./version.js";
 import {
   brotliHostSupportWarning,
   lowCardinalitySortFieldWarning,
   oversizedRecordWarning,
   skewedBlocksWarning,
-  sortFieldCardinalityOf,
   unselectiveTextIndexWarning,
 } from "./warnings.js";
 import { spillOversizedZonemaps } from "./zonemap-budget.js";
@@ -54,7 +45,7 @@ function compressServedFile(content: string, compression: Compression): string |
   return content;
 }
 
-/** Records buffered per sorted run before `externalSort` spills to disk (ADR-0002 §9) — tunable per-call for tests, not part of the persisted config (an execution concern, not a design decision). */
+/** Records buffered per sorted run before `ExternalSorter` spills to disk (ADR-0002 §9) — tunable per-call for tests, not part of the persisted config (an execution concern, not a design decision). */
 const DEFAULT_SORT_RUN_RECORDS = 200_000;
 
 export interface MaterializeOptions {
@@ -68,77 +59,117 @@ export interface MaterializeOptions {
   onProgress?: OnProgress;
 }
 
+/**
+ * Where `materialize` hands each file as soon as it exists, so nothing has to be held until the end:
+ * `build` writes to disk, `inspect --config` keeps only what it reports on. Every `content` is
+ * LOGICAL (uncompressed) — compression is the sink's business.
+ */
+export interface BuildSink {
+  /** A closed block, in ordinal order. */
+  block(file: BlockFile): void;
+  /** Every other content-hashed file the manifest points at, at its final path: index chunk directories and, past the manifest budget, spilled zonemap sidecars (ADR-0003 §3). */
+  file(relPath: string, content: string): void;
+}
+
 export interface MaterializeResult {
   manifest: Manifest;
-  blockFiles: BlockFile[];
-  /** Every non-block content-hashed file the manifest points at: index chunk directories and, past the manifest budget, spilled zonemap sidecars (ADR-0003 §3). */
-  indexFiles: { relPath: string; content: string }[];
   /** Loud, non-fatal build-time warnings (e.g. a `contains` trigram index bigger than its column, ADR-0003 §7). */
   warnings: string[];
+  /** Whole-dataset facts gathered on the way through, for `inspect --config` to report without a second pass. */
+  stats: {
+    maxRecordBytes: number;
+    sortFieldCardinality: number;
+    /** Per `contains` field: its raw column's bytes. */
+    columnBytes: Record<string, number>;
+  };
 }
 
 /**
- * The walking skeleton, minus disk I/O: read config's baked schema → global sort by the sort
- * field → cut into byte-target blocks → compute the manifest (zonemaps + lazy indexes). Pure
- * given `records` already in memory — never touches `output`/`clientOut` — with one exception:
- * the sort step may spill memory-bounded runs to OS-tmpdir scratch files (T13's external sort),
- * cleaned up before returning, so the result is still deterministic and side-effect-free from the
- * caller's perspective. `build` writes this result to disk; `inspect --config` (T11) reads it
- * directly for an exact re-report without ever touching `output`.
+ * The build pipeline, minus deciding where files go: records → derive + drift-check → global sort by
+ * the sort field → cut into byte-target blocks → zonemaps + lazy indexes → manifest. `build` gives it
+ * a sink that writes to disk; `inspect --config` (T11) one that only measures.
+ *
+ * It streams end to end (#28). Each record is derived, drift-checked and handed to the external sort
+ * as it's read; the sort's merge feeds the block cutter; each closed block goes to the sink and to
+ * small accumulators (split-points, zonemap pairs, value → block postings) and is then dropped. So
+ * memory peaks at one sort run plus one block plus the index dictionaries — which grow with distinct
+ * values, not records. The sort spills to OS-tmpdir scratch files, removed before returning.
+ *
+ * Drift is reported once the input has been read, before any block reaches the sink.
  */
 export function materialize(
   resolved: ResolvedConfig,
-  records: Record<string, unknown>[],
+  source: Iterable<Record<string, unknown>>,
+  sink: BuildSink,
   opts: MaterializeOptions = {},
 ): MaterializeResult {
   const generatorVersion = opts.generatorVersion ?? getGeneratorVersion();
   const formatVersion = opts.formatVersion ?? getFormatVersion();
-  const sortKind = resolved.fields[resolved.sortField]!.kind as SortKind;
+  const sortField = resolved.sortField;
   const progress = opts.onProgress;
 
-  // Before anything reads a field: a derived column has to exist by the time drift checks it, the
-  // sort reads it, and the indexers see it (ADR-0009). Doing it here means `build` and
-  // `inspect --config` derive identically, since both enter through `materialize`.
-  progress?.({ phase: "deriving fields", done: records.length, total: records.length, unit: "count" });
-  applyDerivedFields(records, resolved.fields);
+  const indexedSecondaryFields = Object.entries(resolved.fields).filter(
+    ([name, field]) => name !== sortField && field.indexed === true,
+  );
 
-  progress?.({ phase: "checking schema", done: records.length, total: records.length, unit: "count" });
-  assertNoSchemaDrift(records, resolved.fields);
+  const blocks: BlockDescriptor[] = [];
+  const sortTracker = new SortFieldTracker(sortField);
+  const indexers = indexedSecondaryFields.map(([name, field]) => new FieldIndexer(name, field));
+  let maxRecordBytes = 0;
 
-  // The sort has no reportable midpoint (it's one call that may spill runs to disk), so it's an
-  // open-ended phase carrying the record count rather than a fake percentage.
-  progress?.({ phase: `sorting by ${resolved.sortField}`, done: records.length, unit: "count" });
-  const sorted = externalSort(records, {
-    sortField: resolved.sortField,
-    kind: sortKind,
+  const sorter = new ExternalSorter({
+    sortField,
+    kind: resolved.fields[sortField]!.kind as SortKind,
     pk: resolved.pk,
     runRecords: opts.sortRunRecords ?? DEFAULT_SORT_RUN_RECORDS,
     tmpDir: opts.tmpDir ?? os.tmpdir(),
   });
+  try {
+    // Read → derive → drift-check → sort run. A derived column has to exist by the time drift checks
+    // it, the sort reads it, and the indexers see it (ADR-0009); doing it here means `build` and
+    // `inspect --config` derive identically.
+    const derived = derivedFieldsOf(resolved.fields);
+    const drift = new SchemaDriftChecker(resolved.fields);
+    for (const record of source) {
+      if (derived.length > 0) deriveRecord(record, derived);
+      drift.check(record);
+      sorter.add(record);
+    }
+    drift.finish();
 
-  progress?.({ phase: "splitting into data files" });
-  const groups = cutIntoBlocks(sorted, resolved.sortField, resolved.blockBytes);
-  const blockFiles = materializeBlocks(groups);
-  const splitPoints = computeSplitPoints(groups, resolved.sortField);
-  const missing = computeMissingTail(groups, resolved.sortField);
-
-  const indexedSecondaryFields = Object.entries(resolved.fields).filter(
-    ([name, field]) => name !== resolved.sortField && field.indexed === true,
-  );
+    // Merge → cut → sink + accumulators, one block at a time.
+    const recordCount = sorter.size;
+    let recordsDone = 0;
+    progress?.({ phase: `sorting by ${sortField}`, done: recordCount, unit: "count" });
+    const cutter = new BlockCutter(sortField, resolved.blockBytes, ({ file, records }) => {
+      const ordinal = blocks.length;
+      blocks.push({ hash: file.hash, bytes: file.bytes, count: file.count });
+      sink.block(file);
+      sortTracker.addBlock(ordinal, records);
+      for (const indexer of indexers) indexer.addBlock(ordinal, records);
+      recordsDone += file.count;
+      progress?.({ phase: "writing data files", done: recordsDone, total: recordCount, unit: "count" });
+    });
+    for (const { record, line } of sorter.sorted()) {
+      cutter.add(record, line);
+      maxRecordBytes = Math.max(maxRecordBytes, Buffer.byteLength(line, "utf8"));
+    }
+    cutter.finish();
+  } finally {
+    sorter.close();
+  }
 
   const secondaryZonemaps: Record<string, PairZonemapEntry> = {};
   const indexChunkDirs: Record<string, IndexChunkDirEntry[]> = {};
   const reversedChunkDirs: Record<string, IndexChunkDirEntry[]> = {};
   const trigramChunkDirs: Record<string, IndexChunkDirEntry[]> = {};
   const emptyBlocks: Record<string, number[]> = {};
-  const indexFiles: { relPath: string; content: string }[] = [];
+  const columnBytesByField: Record<string, number> = {};
   const warnings: string[] = [];
 
   // Under `gzip`, every manifest-referenced JSON file is written compressed and its path carries the
   // `.gz` suffix. The path IS the signal the client routes on (`fetchReferencedJson`), so there is no
   // flag to keep in sync and a tree mixing compressed and plain files still reads correctly.
-  // `indexFiles[].content` stays LOGICAL (uncompressed) — `build` compresses at write time, and
-  // `inspect --config` reports off the same logical bytes a real build would hash.
   const servedSuffix = compressionSuffix(resolved.compression);
 
   const addIndexChunks = (field: string, subdir: string | null, builtChunks: BuiltIndexChunk[]): IndexChunkDirEntry[] =>
@@ -148,57 +179,34 @@ export function materialize(
       const hash = contentHash(content);
       const base = subdir ? `index/${field}/${subdir}/${hash}` : `index/${field}/${hash}`;
       const relPath = `${base}.json${servedSuffix}`;
-      indexFiles.push({ relPath, content });
+      sink.file(relPath, content);
       return { from, to, file: relPath };
     });
 
-  let fieldsIndexed = 0;
-  for (const [name, field] of indexedSecondaryFields) {
-    // Per-field rather than a single "indexing" phase: index building dominates a big build, and
-    // which field it's chewing on is the useful detail (a `contains` trigram field is the slow one).
-    progress?.({
-      phase: `indexing ${name}`,
-      done: fieldsIndexed,
-      total: indexedSecondaryFields.length,
-      unit: "count",
-    });
-    fieldsIndexed++;
-    const multi = field.multi === true;
-    secondaryZonemaps[name] = computeSecondaryZonemap(groups, name, field.kind, multi);
-    if (multi) emptyBlocks[name] = emptyListBlocks(groups, name);
-    indexChunkDirs[name] = addIndexChunks(
-      name,
-      null,
-      buildInvertedIndex(groups, name, field.kind, resolved.indexChunkBytes, multi),
-    );
+  indexers.forEach((indexer, fieldsIndexed) => {
+    const name = indexedSecondaryFields[fieldsIndexed]![0];
+    // Per-field rather than a single "indexing" phase: chunking a big dictionary takes a while, and
+    // which field it's on is the useful detail (a `contains` trigram field is the slow one).
+    progress?.({ phase: `indexing ${name}`, done: fieldsIndexed, total: indexers.length, unit: "count" });
+    const built = indexer.finish(resolved.indexChunkBytes);
+    secondaryZonemaps[name] = built.zonemap;
+    if (built.emptyBlocks) emptyBlocks[name] = built.emptyBlocks;
+    indexChunkDirs[name] = addIndexChunks(name, null, built.chunks);
 
-    if (field.endsWith) {
-      const reversedChunks = buildReversedIndex(groups, name, resolved.indexChunkBytes, multi);
-      reversedChunkDirs[name] = addIndexChunks(name, "reversed", reversedChunks);
-
-      const unselective = unselectiveTextIndexWarning(
-        name,
-        "endsWith",
-        meanPostingsLength(reversedChunks),
-        groups.length,
-      );
+    if (built.reversedChunks) {
+      reversedChunkDirs[name] = addIndexChunks(name, "reversed", built.reversedChunks);
+      const unselective = unselectiveTextIndexWarning(name, "endsWith", meanPostingsLength(built.reversedChunks), blocks.length);
       if (unselective) warnings.push(unselective);
     }
 
-    if (field.contains) {
-      const trigramChunks = buildTrigramIndex(groups, name, resolved.indexChunkBytes, multi);
-      trigramChunkDirs[name] = addIndexChunks(name, "trigram", trigramChunks);
-
-      const unselective = unselectiveTextIndexWarning(
-        name,
-        "contains",
-        meanPostingsLength(trigramChunks),
-        groups.length,
-      );
+    if (built.trigramChunks) {
+      trigramChunkDirs[name] = addIndexChunks(name, "trigram", built.trigramChunks);
+      const unselective = unselectiveTextIndexWarning(name, "contains", meanPostingsLength(built.trigramChunks), blocks.length);
       if (unselective) warnings.push(unselective);
 
-      const trigramBytes = trigramChunks.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
-      const columnBytes = computeColumnBytes(groups, name, multi);
+      const trigramBytes = built.trigramChunks.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
+      const columnBytes = built.columnBytes!;
+      columnBytesByField[name] = columnBytes;
       if (trigramBytes > columnBytes) {
         warnings.push(
           `blockdb: contains(${name}): trigram index (${trigramBytes} bytes) is bigger than the data — ` +
@@ -207,19 +215,14 @@ export function materialize(
         );
       }
     }
-  }
-
-  progress?.({
-    phase: "building manifest",
-    done: indexedSecondaryFields.length,
-    total: indexedSecondaryFields.length,
-    unit: "count",
   });
+
+  progress?.({ phase: "building manifest", done: indexers.length, total: indexers.length, unit: "count" });
   const rawManifest = buildManifest({
     config: resolved,
-    blockFiles,
-    splitPoints,
-    missing,
+    blockFiles: blocks,
+    splitPoints: sortTracker.splitPoints(),
+    missing: sortTracker.missingTail(),
     secondaryZonemaps,
     indexChunkDirs,
     reversedChunkDirs,
@@ -232,26 +235,26 @@ export function materialize(
   // Root-manifest budget (ADR-0003 §3): spill the largest secondary zonemaps to per-field
   // sidecars, largest first, until the gzipped root is back under budget.
   const { manifest, sidecarFiles, warning: budgetWarning } = spillOversizedZonemaps(rawManifest, servedSuffix);
-  indexFiles.push(...sidecarFiles);
+  for (const { relPath, content } of sidecarFiles) sink.file(relPath, content);
   if (budgetWarning) warnings.push(budgetWarning);
 
-  const maxRecordBytes = records.reduce((max, r) => Math.max(max, Buffer.byteLength(JSON.stringify(r), "utf8")), 0);
   const oversizedWarning = oversizedRecordWarning(maxRecordBytes, resolved.blockBytes);
   if (oversizedWarning) warnings.push(oversizedWarning);
 
-  const skewWarning = skewedBlocksWarning(blockFiles);
+  const skewWarning = skewedBlocksWarning(blocks);
   if (skewWarning) warnings.push(skewWarning);
 
-  const cardinalityWarning = lowCardinalitySortFieldWarning(
-    records.length,
-    sortFieldCardinalityOf(records, resolved.sortField),
-  );
+  const cardinalityWarning = lowCardinalitySortFieldWarning(manifest.dataset.recordCount, sortTracker.cardinality());
   if (cardinalityWarning) warnings.push(cardinalityWarning);
 
   const brotliWarning = brotliHostSupportWarning(resolved.compression);
   if (brotliWarning) warnings.push(brotliWarning);
 
-  return { manifest, blockFiles, indexFiles, warnings };
+  return {
+    manifest,
+    warnings,
+    stats: { maxRecordBytes, sortFieldCardinality: sortTracker.cardinality(), columnBytes: columnBytesByField },
+  };
 }
 
 export interface BuildOptions {
@@ -276,18 +279,18 @@ export interface BuildResult {
 }
 
 /**
- * Reads config's input, materializes the served tree in memory (`materialize`), then writes it
- * out: the manifest + content-hash-named blocks/index chunks, and the generated client
- * (schema.ts + client.ts) in one pass.
+ * Reads config's input and streams it through `materialize` into a staging directory beside
+ * `output`: blocks and index chunks are written as they're produced, then the manifest. Only a
+ * finished tree replaces `output`, so a build that fails part-way — drift, bad input, a full disk —
+ * leaves the previous build in place. Then generates the client (schema.ts + client.ts).
  */
 export function build(config: BlockDbConfig, opts: BuildOptions): BuildResult {
   const resolved = resolveConfig(config, opts.baseDir);
   const generatorVersion = opts.generatorVersion ?? getGeneratorVersion();
-  const formatVersion = opts.formatVersion ?? getFormatVersion();
-
   const progress = opts.onProgress;
+  const compression = resolved.compression;
 
-  const records = readInputRecords(resolved.inputPath, {
+  const records = iterateInputRecords(resolved.inputPath, {
     format: resolved.inputFormat,
     delimiter: resolved.inputDelimiter,
     recordsPath: resolved.inputRecordsPath,
@@ -295,46 +298,64 @@ export function build(config: BlockDbConfig, opts: BuildOptions): BuildResult {
     ...(progress ? { onProgress: progress } : {}),
   });
 
-  const { manifest, blockFiles, indexFiles, warnings } = materialize(resolved, records, {
-    generatorVersion,
-    formatVersion,
-    sortRunRecords: opts.sortRunRecords,
-    tmpDir: opts.tmpDir,
-    ...(progress ? { onProgress: progress } : {}),
-  });
+  const staging = path.join(path.dirname(resolved.output), `.${path.basename(resolved.output)}.blockdb-partial`);
+  rmSync(staging, { recursive: true, force: true });
+  let manifest: Manifest;
+  let warnings: string[];
+  try {
+    mkdirSync(staging, { recursive: true });
+    const writeServed = (relPath: string, content: string) => {
+      const filePath = path.join(staging, relPath);
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      // Compression is a transport concern applied only at write time — every content-hash stays
+      // over the LOGICAL uncompressed bytes, so toggling compression between rebuilds never perturbs
+      // file names or the manifest/index structures keyed on them.
+      writeFileSync(filePath, compressServedFile(content, compression));
+    };
+
+    // A block's final path depends on the total block count (hash-prefix subdirectories past
+    // `HASH_PREFIX_THRESHOLD`), which isn't known until the last block closes — so blocks land flat
+    // and move afterwards if needed.
+    ({ manifest, warnings } = materialize(
+      resolved,
+      records,
+      {
+        block: (file) => writeServed(blockRelPath(file.hash, 0, compression), file.content),
+        file: writeServed,
+      },
+      {
+        generatorVersion,
+        formatVersion: opts.formatVersion,
+        sortRunRecords: opts.sortRunRecords,
+        tmpDir: opts.tmpDir,
+        ...(progress ? { onProgress: progress } : {}),
+      },
+    ));
+
+    const blockCount = manifest.blocks.length;
+    if (blockCount > HASH_PREFIX_THRESHOLD) {
+      for (const { hash } of manifest.blocks) {
+        const to = path.join(staging, blockRelPath(hash, blockCount, compression));
+        mkdirSync(path.dirname(to), { recursive: true });
+        renameSync(path.join(staging, blockRelPath(hash, 0, compression)), to);
+      }
+    }
+
+    // Minified, not pretty-printed: every client downloads this file before it can run a query, and
+    // the ADR-0003 §3 budget is measured on gzip(minified) — so indentation would be bytes the budget
+    // never accounted for (~2.2x the file on a real dataset). `curl | jq` reads minified JSON fine.
+    //
+    // Under compression it also ships pre-compressed. The name changes rather than the encoding alone,
+    // so a stale plain `manifest.json` left in an output directory can never be silently served as if
+    // it were current — and the generated client below is stamped with which one to fetch.
+    writeServed(`manifest.json${compressionSuffix(compression)}`, JSON.stringify(manifest));
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
 
   rmSync(resolved.output, { recursive: true, force: true });
-  mkdirSync(resolved.output, { recursive: true });
-  let blocksWritten = 0;
-  for (const file of blockFiles) {
-    const filePath = path.join(resolved.output, blockRelPath(file.hash, blockFiles.length, resolved.compression));
-    mkdirSync(path.dirname(filePath), { recursive: true });
-    // Compression is a transport concern applied only at write time — the content-hash (computed
-    // in `block.ts`) stays over the LOGICAL uncompressed NDJSON, so toggling gzip between rebuilds
-    // never perturbs block hashes or the manifest/index structures keyed on them.
-    writeFileSync(filePath, compressServedFile(file.content, resolved.compression));
-    progress?.({ phase: "writing data files", done: ++blocksWritten, total: blockFiles.length, unit: "count" });
-  }
-  let indexFilesWritten = 0;
-  for (const { relPath, content } of indexFiles) {
-    const filePath = path.join(resolved.output, relPath);
-    mkdirSync(path.dirname(filePath), { recursive: true });
-    // The relPath the manifest already points at decides this — see `servedSuffix` in `materialize`.
-    writeFileSync(filePath, compressServedFile(content, resolved.compression));
-    progress?.({ phase: "writing index files", done: ++indexFilesWritten, total: indexFiles.length, unit: "count" });
-  }
-  // Minified, not pretty-printed: every client downloads this file before it can run a query, and
-  // the ADR-0003 §3 budget is measured on gzip(minified) — so indentation would be bytes the budget
-  // never accounted for (~2.2x the file on a real dataset). `curl | jq` reads minified JSON fine.
-  //
-  // Under `gzip` it also ships pre-compressed. The name changes rather than the encoding alone, so a
-  // stale plain `manifest.json` left in an output directory can never be silently served as if it
-  // were current — and the generated client below is stamped with which one to fetch.
-  const manifestJson = JSON.stringify(manifest);
-  writeFileSync(
-    path.join(resolved.output, `manifest.json${compressionSuffix(resolved.compression)}`),
-    compressServedFile(manifestJson, resolved.compression),
-  );
+  renameSync(staging, resolved.output);
 
   progress?.({ phase: "generating client", done: 1, total: 1, unit: "count" });
   mkdirSync(resolved.clientOut, { recursive: true });
@@ -344,7 +365,7 @@ export function build(config: BlockDbConfig, opts: BuildOptions): BuildResult {
     generateClientTs(manifest, {
       basePath: resolved.basePath,
       generatorVersion,
-      ...(resolved.compression !== "none" ? { manifestCompression: resolved.compression } : {}),
+      ...(compression !== "none" ? { manifestCompression: compression } : {}),
     }),
   );
 

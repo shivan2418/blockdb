@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { compareRecordsForSort, compareSortValues, externalSort } from "../src/sort.js";
+import { compareRecordsForSort, compareSortValues, ExternalSorter, externalSort } from "../src/sort.js";
 
 describe("compareSortValues", () => {
   test("orders numbers ascending", () => {
@@ -131,5 +131,38 @@ describe("externalSort", () => {
     ];
     const sorted = externalSort(records, { sortField: "year", kind: "number", runRecords: 2, tmpDir });
     expect(sorted.map((r) => r.year)).toEqual([1, 2, 3, 4, 5, null, undefined]);
+  });
+
+  test("spills on bytes as well as record count, so a few huge records can't fill memory", () => {
+    const records = Array.from({ length: 12 }, (_, i) => ({ id: 12 - i, text: "x".repeat(1000) }));
+    const sorter = new ExternalSorter({ sortField: "id", kind: "number", runRecords: 1_000_000, runBytes: 3000, tmpDir });
+    try {
+      for (const record of records) sorter.add(record);
+      // Three records of ~1 KB each reach the byte limit — the run files exist before any merging.
+      expect(readdirSync(tmpDir).filter((name) => name.startsWith("blockdb-sort-"))).toHaveLength(1);
+      expect([...sorter.sorted()].map((item) => item.record.id)).toEqual(Array.from({ length: 12 }, (_, i) => i + 1));
+    } finally {
+      sorter.close();
+    }
+    expect(readdirSync(tmpDir)).toEqual([]);
+  });
+
+  test("hands back each record with its serialized line, whether it was spilled or not", () => {
+    const records = [{ id: 2, t: "b" }, { id: 1, t: "a" }, { id: 3, t: "c" }];
+    for (const runRecords of [1, 10]) {
+      const sorter = new ExternalSorter({ sortField: "id", kind: "number", runRecords, tmpDir });
+      for (const record of records) sorter.add(record);
+      const items = [...sorter.sorted()];
+      sorter.close();
+      expect(items.map((item) => item.line)).toEqual(['{"id":1,"t":"a"}', '{"id":2,"t":"b"}', '{"id":3,"t":"c"}']);
+      for (const item of items) expect(JSON.stringify(item.record)).toBe(item.line);
+    }
+  });
+
+  test("merges many runs in exactly the order a single in-memory sort gives, ties included", () => {
+    // Heavy key repetition and a pk that doesn't break every tie, so the full-line tie-break decides.
+    const records = Array.from({ length: 997 }, (_, i) => ({ year: (i * 7919) % 13, id: i % 5, n: (i * 31) % 97 }));
+    const opts = { sortField: "year", kind: "number" as const, pk: "id", tmpDir };
+    expect(externalSort(records, { ...opts, runRecords: 7 })).toEqual(externalSort(records, { ...opts, runRecords: 10_000 }));
   });
 });
