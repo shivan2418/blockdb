@@ -8,9 +8,9 @@ Query large datasets from any static host: no backend, no WASM, no HTTP Range re
 
 ```bash
 pnpm add blockdb && pnpm add -D blockdb-cli
-npx blockdb-cli init      # a guided wizard reads a sample of your data, recommends
-                                #   what to index, and writes blockdb.config.json
-npx blockdb build         # → public/blockdb/  (deploy this)  +  src/blockdb/  (commit this)
+npx blockdb init data/movies.ndjson   # a guided wizard reads your data, recommends
+                                      #   what to index, and writes blockdb.config.json
+npx blockdb build                     # → public/blockdb/ (deploy this) + src/blockdb/ (commit this)
 ```
 
 ```ts
@@ -24,6 +24,8 @@ const { records } = await db.movies.findMany({
 });
 ```
 
+Every operator, sorting, pagination, counting and what each query costs: see the **[query guide](docs/query-guide.md)**.
+
 Two complete, working example apps — a movie catalog and a product lookup, each building → deploying → querying in a real browser — live in [`examples/`](https://github.com/shivan2418/blockdb/tree/master/examples).
 
 ## Why blockdb?
@@ -34,7 +36,8 @@ blockdb splits your data into **many small whole files** at build time, indexes 
 
 - **Runs on any static host.** It fetches whole files by URL — no HTTP Range support required. GitHub Pages, S3, an old nginx, a corporate proxy: if it can serve a file, it works.
 - **Compression actually works.** Range requests and on-the-fly gzip/brotli fight each other (byte offsets shift once compressed), so the one-file camp often has to serve data *uncompressed*. Whole-file blocks compress end-to-end — a big deal for JSON, which shrinks 5–10×.
-- **A typed client, no engine.** The generated client is small JS with zero runtime dependencies and no multi-MB WASM to download and compile before the first query. Your fields and per-field operators are typed from the data.
+- **A typed client, no engine.** The generated client is small JS with no multi-MB WASM to download and compile before the first query. Your fields and per-field operators are typed from the data.
+- **Zero dependencies.** Neither package has a single runtime dependency: the runtime and the CLI are each one package that installs nothing else. Nothing to audit, no transitive update to break your build, and the runtime ships nothing to the browser beyond its own code.
 
 **The honest cost:** many small files means **more HTTP requests** than a single range-read file, and it's **read-only** (you rebuild and redeploy to update). If those are dealbreakers, pick one of the alternatives below.
 
@@ -44,7 +47,7 @@ blockdb splits your data into **many small whole files** at build time, indexes 
 - The data is **read-only** from the browser's side — rebuild-to-update is fine.
 - You have **no backend** — just static hosting or a CDN.
 - You want **type-safe queries** in TypeScript, generated from your data.
-- You want to keep the client **lightweight** (no WASM engine, no heavy dependencies).
+- You want to keep the client **lightweight** (no WASM engine, no dependencies).
 
 ### Reach for something else when
 

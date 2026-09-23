@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-07-20
 **Ticket:** [T2 — Query API surface (#3)](https://github.com/shivan2418/static-shard/issues/3)
-**Prototype:** branch [`prototype/query-api`](https://github.com/shivan2418/static-shard/tree/prototype/query-api) — four candidate shapes, all type-checked under `tsc`.
+**Prototype:** branch `prototype/query-api` (deleted 2026-09-22; last commit `bfb2bdf`) — four candidate shapes, all type-checked under `tsc`.
 
 ## Context
 

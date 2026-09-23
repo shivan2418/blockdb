@@ -10,9 +10,9 @@ See the [project README](https://github.com/shivan2418/blockdb#readme) for the f
 
 ```bash
 pnpm add blockdb && pnpm add -D blockdb-cli
-npx blockdb-cli init      # a guided wizard reads a sample of your data, recommends
-                                #   what to index, and writes blockdb.config.json
-npx blockdb build         # → public/blockdb/  (deploy this)  +  src/blockdb/  (commit this)
+npx blockdb init data/movies.ndjson   # a guided wizard reads your data, recommends
+                                      #   what to index, and writes blockdb.config.json
+npx blockdb build                     # → public/blockdb/ (deploy this) + src/blockdb/ (commit this)
 ```
 
 ```ts
@@ -28,49 +28,43 @@ const { records, hasMore } = await db.movies.findMany({
 
 `db.<collection>` is a real, named member with go-to-definition and intellisense on both the field and its available operators — the type system only offers operators the built data actually indexed. See [`examples/`](https://github.com/shivan2418/blockdb/tree/master/examples) in the repo for two complete, working example apps (movie catalog, product lookup) that build → deploy → query in a real browser.
 
-## List fields
+## Querying
+
+The full reference, with every operator, sorting, pagination, counting, errors and what each query costs, is the **[query guide](https://github.com/shivan2418/blockdb/blob/master/docs/query-guide.md)**. Two things worth knowing up front:
+
+### List fields
 
 A multi-valued field (`"multi": true`) takes list operators instead of scalar ones:
 
 ```ts
-await db.cards.findMany({ where: { colors: { some: "W" } } });                  // any element is W
-await db.cards.findMany({ where: { colors: { hasEvery: ["W", "U"] } } });       // contains W and U
-await db.cards.findMany({ where: { colors: { every: { in: ["W", "U"] } } } });  // only W/U; [] passes
-await db.cards.findMany({ where: { colors: { isEmpty: true } } });              // []
-// Keys on one field AND together, so exactly [W, U] is:
-await db.cards.findMany({ where: { colors: { hasEvery: ["W", "U"], every: { in: ["W", "U"] } } } });
+await db.books.findMany({ where: { tags: { some: "poetry" } } });                       // any tag is poetry
+await db.books.findMany({ where: { tags: { hasEvery: ["poetry", "travel"] } } });       // has both
+await db.books.findMany({ where: { tags: { every: { in: ["poetry", "travel"] } } } });  // no other tags; [] passes
+await db.books.findMany({ where: { tags: { isEmpty: true } } });                        // []
+// Operators on one field AND together, so exactly [poetry, travel] is:
+await db.books.findMany({ where: { tags: { hasEvery: ["poetry", "travel"], every: { in: ["poetry", "travel"] } } } });
 ```
 
-All of them need a present list: a record with no `colors` key, or `null`, matches none, including `isEmpty`. All of them prune through the index, but `every` is the weakest, since "only W or U" admits many blocks. See ADR-0010.
+A record whose list is missing or `null` matches none of them, including `isEmpty`.
 
-## Case-insensitive search: fold at build time
+### Case-insensitive search: fold at build time
 
-`equals`, `in`, `startsWith`, `endsWith` and `contains` all compare **exactly**. The index stores the values it was built from, so on Title Case data `contains: "bolt"` finds nothing while `contains: "Bolt"` works. Folding only the query can't fix that, because the index keys are still `"Bol"`, not `"bol"`.
-
-The fix is a **derived field** (ADR-0009): a column the build computes from another, here with the `fold` normalizer (lowercase, diacritics stripped). In `blockdb.config.json`:
+Every string operator compares **exactly**, against an index built from the stored values, so on Title Case data `contains: "atlas"` finds nothing. Folding only the query can't fix that. Instead, add a **derived field** that the build computes with the `fold` normalizer (lowercase, accents stripped):
 
 ```json
-"name_fold": {
-  "kind": "string",
-  "indexed": true,
-  "contains": true,
-  "absent": true,
-  "derive": { "from": "name", "using": "fold" }
-}
+"title_fold": { "kind": "string", "indexed": true, "contains": true, "derive": { "from": "title", "using": "fold" } }
 ```
 
-Then fold the query the same way with the exported `normalize`, so it lines up with the index:
+Then fold the query the same way with the exported `normalize`, which is the same function the build uses:
 
 ```ts
 import { normalize } from "blockdb";
 
 const q = normalize("fold", input) ?? "";
-await db.cards.findMany({ where: { name_fold: { contains: q } } }); // "lim-dul" → Lim-Dûl, …
+await db.books.findMany({ where: { title_fold: { contains: q } } }); // "cafe" finds "Café Atlas"
 ```
 
-`name` itself is untouched, so you still display it, sort by it and match it exactly. The other normalizers are `lowercase` (case only), `trim` and `numeric`; `normalize` mirrors the build's copies exactly. A derived column costs one extra index; if you only ever search the folded column, drop `contains` from the source field to get that cost back.
-
-Don't retry a failed query in different capitalization instead. It can't help mid-word matches, it doubles the cost of every miss, and a miss is the expensive path: a zero-result query still fetches every candidate block.
+`title` itself is untouched, so you still display it, sort by it and match it exactly. The other normalizers are `lowercase`, `trim` and `numeric`.
 
 ## License
 
