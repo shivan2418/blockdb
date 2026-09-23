@@ -544,14 +544,25 @@ export class SchemaInferrer {
     return this.recordCount;
   }
 
-  /** `blockShare` lets the index recommendation skip fields that wouldn't prune; without it, cardinality alone decides. */
-  finish(opts: { blockShare?: BlockShareProbe } = {}): InferenceResult {
+  /**
+   * `blockShare` lets the index recommendation skip fields that wouldn't prune; without it, cardinality
+   * alone decides. `sortField` is the sort field the caller will actually use (a `--sort-field`, or the
+   * one an existing config keeps): the index recommendation is judged against it, since which values
+   * cluster depends entirely on the sort. It is used when the data has it as a single-valued sortable
+   * field, and the recommendation falls back to inferring one otherwise. May be called again with
+   * other options; the counts aren't consumed.
+   */
+  finish(opts: { blockShare?: BlockShareProbe; sortField?: string } = {}): InferenceResult {
     const recordCount = this.recordCount;
     const fields: Record<string, InferredField> = {};
     // Fields in order of first appearance, like the records' own keys.
     for (const [name, field] of this.stats) fields[name] = field.finish(recordCount);
 
-    const sortField = recommendSortField(fields, recordCount);
+    const chosen = opts.sortField === undefined ? undefined : fields[opts.sortField];
+    const sortField =
+      chosen !== undefined && SORTABLE_KINDS.includes(chosen.kind as SortableKind) && !chosen.multi
+        ? opts.sortField!
+        : recommendSortField(fields, recordCount);
     const pk = recommendPk(fields);
     const { indexedFields, unselectiveIndexes } = recommendIndexedFields(fields, recordCount, sortField, opts.blockShare);
 

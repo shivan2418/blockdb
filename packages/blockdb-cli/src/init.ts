@@ -5,7 +5,7 @@ import { estimateBlockCount } from "./estimator.js";
 import { SchemaInferrer, type BlockShareProbe, type InferenceResult, type UnselectiveIndex, type ValueShape } from "./infer.js";
 import { BlockShareEstimator } from "./prune-estimate.js";
 import { Reservoir } from "./reservoir.js";
-import { iterateInputRecords, type InputReadOptions, type PopulationStats } from "./input.js";
+import { countInputRecords, iterateInputRecords, type InputReadOptions, type PopulationStats } from "./input.js";
 import type { OnProgress } from "./progress.js";
 import { MIN_BLOCKS_FOR_SELECTIVITY, skippedIndexNote, unsuitableTextIndexWarning } from "./warnings.js";
 import type { FieldConfig, InputFormat, BlockDbConfig } from "./types.js";
@@ -33,6 +33,13 @@ export interface InputScan {
   sample: Record<string, unknown>[];
   /** Record count and serialized bytes of everything read — bytes only when `measureBytes` was asked for. */
   population: PopulationStats;
+  /**
+   * The inference again, with the index recommendation judged against another sort field or block
+   * size, from the same counts and prune sample. The wizard calls it once it knows its block size.
+   */
+  recommendFor(opts: { sortField?: string; blockBytes: number }): InferenceResult;
+  /** The records the index recommendation judges pruning from (scalar fields only), so the wizard's live "barely prunes" agrees with it. */
+  pruneSample: Record<string, unknown>[];
 }
 
 /**
@@ -97,12 +104,16 @@ function blockShareProbe(
  * One streaming pass over the input for `init` and the wizard: infers the schema, draws the estimate
  * sample and measures the dataset without ever holding more than one record plus the samples (#29).
  * Shared so the two paths can't read the input differently and drift apart in what they recommend.
- * `blockBytes` is the target block size the recommendation judges index pruning against.
+ *
+ * The index recommendation is judged for `sortField` (the one the caller will use, falling back to the
+ * inferred one) at `blockBytes`. When the read stops early (`readOpts.limit`), pass the input's true
+ * totals as `population`: how many data files there will be, and so whether a value sits in most of
+ * them, depends on the whole input, not the records read.
  */
 export function scanInput(
   inputPath: string,
   readOpts: InputReadOptions,
-  opts: { estimateSample?: number; measureBytes?: boolean; blockBytes?: number } = {},
+  opts: { estimateSample?: number; measureBytes?: boolean; blockBytes?: number; sortField?: string; population?: PopulationStats } = {},
 ): InputScan {
   const inferrer = new SchemaInferrer();
   const reservoir = new Reservoir<Record<string, unknown>>(opts.estimateSample ?? 0);
@@ -119,16 +130,24 @@ export function scanInput(
   if (inferrer.size === 0) {
     throw new Error(`blockdb: init found no records in "${inputPath}" to infer a schema from`);
   }
-  const blockShare = blockShareProbe(
-    pruneSample.sample,
-    inferrer.size,
-    opts.measureBytes ? datasetBytes : undefined,
-    opts.blockBytes ?? DEFAULT_BLOCK_BYTES,
-  );
+  const recordCount = opts.population?.recordCount ?? inferrer.size;
+  const measuredBytes = opts.population?.datasetBytes ?? (opts.measureBytes ? datasetBytes : undefined);
+  const recommendFor = (recommend: { sortField?: string; blockBytes: number }): InferenceResult => {
+    const blockShare = blockShareProbe(pruneSample.sample, recordCount, measuredBytes, recommend.blockBytes);
+    return inferrer.finish({
+      ...(blockShare ? { blockShare } : {}),
+      ...(recommend.sortField !== undefined ? { sortField: recommend.sortField } : {}),
+    });
+  };
   return {
-    inferred: inferrer.finish(blockShare ? { blockShare } : {}),
+    inferred: recommendFor({
+      ...(opts.sortField !== undefined ? { sortField: opts.sortField } : {}),
+      blockBytes: opts.blockBytes ?? DEFAULT_BLOCK_BYTES,
+    }),
     sample: reservoir.sample,
     population: { recordCount: inferrer.size, datasetBytes },
+    recommendFor,
+    pruneSample: pruneSample.sample.map((item) => item.record),
   };
 }
 
@@ -356,18 +375,24 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     // Streams: inference holds counts per field, never the records, so reading everything is safe on
     // any size of input (#29).
     const blockBytes = opts.blockBytes ?? existing?.blockBytes;
+    const readOpts: InputReadOptions = { format, delimiter: readDelimiter, recordsPath, fields: {} };
+    const resolvedInput = path.resolve(opts.cwd, inputPath);
+    // Reads everything unless the caller opted into a sample (see `sampleLimit`). A sampled read still
+    // needs the input's true size to judge index pruning, so it's counted (cheaply: no inference).
+    const limit = sampleLimit(opts);
+    const population = limit === undefined ? undefined : countInputRecords(resolvedInput, readOpts);
+    // The sort field this run will keep, when it's known before reading: a flag, or the existing
+    // config's. The index recommendation is judged against it (it falls back to the inferred one when
+    // the data no longer has it).
+    const preferredSortField = opts.sortField ?? existing?.schema.sortField;
     const { inferred } = scanInput(
-      path.resolve(opts.cwd, inputPath),
+      resolvedInput,
+      { ...readOpts, limit, ...(opts.onProgress ? { onProgress: opts.onProgress } : {}) },
       {
-        format,
-        delimiter: readDelimiter,
-        recordsPath,
-        fields: {},
-        // Reads everything unless the caller opted into a sample (see `sampleLimit`).
-        limit: sampleLimit(opts),
-        ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+        ...(blockBytes !== undefined ? { blockBytes } : {}),
+        ...(preferredSortField !== undefined ? { sortField: preferredSortField } : {}),
+        ...(population !== undefined ? { population } : {}),
       },
-      blockBytes !== undefined ? { blockBytes } : {},
     );
     unselectiveIndexes = inferred.unselectiveIndexes;
 
@@ -485,11 +510,16 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     }
   }
 
-  // Only the fields that are still unindexed after flags and kept choices: `--indexed` or an existing
-  // config that indexes the field overrules the recommendation, and then there is nothing to explain.
-  const skippedIndexNotes = unselectiveIndexes
-    .filter(({ field }) => config.schema.fields[field] !== undefined && config.schema.fields[field]!.indexed !== true)
-    .map(({ field, blockShare }) => skippedIndexNote(field, sortField, blockShare));
+  // Only where the recommendation actually decided: not when `--indexed` gave the complete set (the
+  // wizard always does), and not for a field the existing config already had, whose indexing is a
+  // kept choice. Then only the fields that did end up unindexed.
+  const priorFields = existing?.schema.fields;
+  const skippedIndexNotes = opts.indexedFields
+    ? []
+    : unselectiveIndexes
+        .filter(({ field }) => priorFields?.[field] === undefined)
+        .filter(({ field }) => config.schema.fields[field] !== undefined && config.schema.fields[field]!.indexed !== true)
+        .map(({ field, blockShare }) => skippedIndexNote(field, sortField, blockShare));
 
   return {
     configPath: opts.configPath,

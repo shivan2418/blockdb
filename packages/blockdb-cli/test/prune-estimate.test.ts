@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { build } from "../src/build.js";
-import { resolveInitConfig, scanInput } from "../src/init.js";
+import { init, resolveInitConfig, scanInput } from "../src/init.js";
 import { BlockShareEstimator } from "../src/prune-estimate.js";
 import { Reservoir } from "../src/reservoir.js";
 
@@ -112,5 +112,58 @@ describe("init leaves out indexes that wouldn't prune (#31)", () => {
     });
     expect(result.config.schema.fields.color!.indexed).toBe(true);
     expect(result.warnings.filter((w) => /init left "color"/.test(w))).toEqual([]);
+  });
+
+  test("the check is judged against the sort field the config will use, not the inferred one", () => {
+    // Sorted by id, batch clusters and tone scatters; sorted by color it's the other way round.
+    const byColor = Array.from({ length: RECORDS }, (_, id) => ({
+      id,
+      color: `c${id % 20}`,
+      tone: `t${Math.floor((id % 20) / 4)}`,
+      batch: `b${Math.floor(id / 200)}`,
+    }));
+    writeFileSync(path.join(tmpDir, "colors.ndjson"), byColor.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const result = resolveInitConfig({
+      cwd: tmpDir,
+      configPath: path.join(tmpDir, "colors.config.json"),
+      yes: true,
+      inputPath: "colors.ndjson",
+      blockBytes: BLOCK_BYTES,
+      sortField: "color",
+    });
+    const fields = result.config.schema.fields;
+    expect(result.config.schema.sortField).toBe("color");
+    expect(fields.tone!.indexed).toBe(true);
+    expect(fields.batch!.indexed).toBeUndefined();
+    expect(result.warnings.filter((w) => /init left/.test(w))).toEqual([expect.stringMatching(/init left "batch" unindexed — sorted by "color"/)]);
+
+    const both = structuredClone(result.config);
+    both.schema.fields.batch!.indexed = true;
+    const { warnings } = build(both, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const barelyPrunes = warnings.flatMap((w) => /index\((\w+)\): this index barely prunes/.exec(w)?.[1] ?? []);
+    expect(barelyPrunes).toEqual(["batch"]);
+  });
+
+  test("a sampled read judges pruning against the whole input's size, not the sample's", () => {
+    // The first 5,000 records alone would make too few blocks to judge, and color would be indexed.
+    const result = resolveInitConfig({
+      cwd: tmpDir,
+      configPath: path.join(tmpDir, "blockdb.config.json"),
+      yes: true,
+      inputPath: "items.ndjson",
+      blockBytes: BLOCK_BYTES,
+      sampleSize: 5000,
+    });
+    expect(result.config.schema.fields.color!.indexed).toBeUndefined();
+    expect(result.config.schema.fields.batch!.indexed).toBe(true);
+    expect(result.warnings.some((w) => /init left "color" unindexed/.test(w))).toBe(true);
+  });
+
+  test("--reinfer doesn't re-explain a field the existing config already leaves unindexed", () => {
+    const configPath = path.join(tmpDir, "blockdb.config.json");
+    const first = init({ cwd: tmpDir, configPath, yes: true, inputPath: "items.ndjson", blockBytes: BLOCK_BYTES });
+    expect(first.warnings.filter((w) => /init left/.test(w))).toHaveLength(2);
+    const again = resolveInitConfig({ cwd: tmpDir, configPath, yes: true, reinfer: true });
+    expect(again.warnings.filter((w) => /init left/.test(w))).toEqual([]);
   });
 });
