@@ -11,6 +11,9 @@ import type { FieldKind } from "./types.js";
  * and the derived key is then omitted from the record rather than filled with a guess.
  *
  * Domain rules stay the caller's job: preprocess the input, or add a column upstream.
+ *
+ * The runtime exports its own copy as `normalize()`, so consumers can normalize a query value to match
+ * a derived column. `test/normalize.test.ts` checks the two agree; change them together.
  */
 export interface Normalizer {
   /** The `kind` a field deriving with this normalizer must declare; `config.ts` enforces the match. */

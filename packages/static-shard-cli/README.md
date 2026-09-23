@@ -43,7 +43,18 @@ The wizard measures this rather than guessing. It asks what you filter on **firs
 - **"bigger than the data"** — the structure exceeds the raw column it indexes. A size complaint.
 - **"barely prunes"** — the average lookup resolves to most of your data files, so a query using it still reads most of the dataset. Typical of identifier, URL, and near-constant fields, whose substrings spread evenly across every file. Substring-searching a UUID column costs a full extra index and buys nothing.
 
-An index can be small and useless, or large and worth it, so the two warnings are independent. Text matching is also **case-sensitive** with no folded index — see the [runtime README](https://www.npmjs.com/package/static-shard#text-matching-is-case-sensitive).
+An index can be small and useless, or large and worth it, so the two warnings are independent. Text matching is also **case-sensitive**; for case- and accent-insensitive search, see [derived fields](#derived-fields).
+
+### Derived fields
+
+A derived field is a column `build` computes from another field before sharding (ADR-0009). After that it behaves like any other column: indexable, sortable, typed. The normalizers are a closed set: `fold` (lowercase, diacritics stripped), `lowercase`, `trim` and `numeric`. A value a normalizer can't map, like `numeric` on `"*"`, leaves the derived key absent rather than guessing.
+
+```json
+"name_fold":  { "kind": "string", "indexed": true, "contains": true, "absent": true, "derive": { "from": "name", "using": "fold" } },
+"power_num":  { "kind": "number", "indexed": true, "absent": true, "derive": { "from": "power", "using": "numeric" } }
+```
+
+`name_fold` gives case- and accent-insensitive search; normalize the query with the runtime's `normalize("fold", input)` so it matches ([runtime README](https://www.npmjs.com/package/static-shard#case-insensitive-search-fold-at-build-time)). `power_num` gives numeric ranges over a column stored as text. `derive.from` must be a declared, non-derived field, and the declared `kind` must match the normalizer's output.
 
 ### Typing json payloads
 

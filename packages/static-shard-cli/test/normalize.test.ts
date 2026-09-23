@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { normalize as runtimeNormalize } from "static-shard";
 import { NORMALIZERS, isNormalizerName, normalizerNames } from "../src/normalize.js";
 
 /**
@@ -88,6 +89,24 @@ describe("the registry itself", () => {
       const normalizer = NORMALIZERS[name];
       expect(normalizer).toBeDefined();
       expect(["string", "number", "boolean", "date"]).toContain(normalizer.outputKind);
+    }
+  });
+});
+
+/**
+ * The runtime ships its own copy so consumers can normalize a query value the way the build
+ * normalized the column. The two copies must agree on every input, or a folded search silently
+ * misses rows the index holds.
+ */
+describe("parity with the runtime's normalize()", () => {
+  const SAMPLES: unknown[] = [
+    "Lim-Dûl the Necromancer", "Jötun Grunt", "Æther Vial", "  Sol Ring  ", "ÉCOLE", "İstanbul",
+    "straße", "", "   ", "7", " -3.5 ", "1+*", "*", "∞", "Infinity", 0, 12.5, Number.NaN, null, undefined, true,
+  ];
+
+  test.each(normalizerNames())("%s", (name) => {
+    for (const sample of SAMPLES) {
+      expect(runtimeNormalize(name, sample)).toStrictEqual(NORMALIZERS[name].apply(sample));
     }
   });
 });
