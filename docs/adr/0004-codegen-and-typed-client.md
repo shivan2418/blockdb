@@ -27,7 +27,7 @@ The prototype built the machinery for real over a mock dataset and type-checked 
 
 The generated `as const` schema drives the runtime's mapped types. Operator availability is **data**, not implied by `kind`: each field carries an `operators` tuple (ADR-0003 §7 — "operator available ⟺ its structure was built"), and `FilterFor<F>` exposes exactly that subset with per-type value types. This realizes, at the type level:
 
-- **queryable ⟺ indexed** (non-indexed fields are payload-readable, not filterable);
+- **queryable ⟺ indexed** (non-indexed fields are payload-readable, not filterable); *(Amended 2026-09-23, ADR-0013: every non-json scalar field is filterable; `RiderGuard` now reads each field's `pruning` list, so `not`, the missing-value operators and any filter on an unindexed field are riders. The runtime check throws `NEEDS_PRUNING`. `orderBy` accepts every queryable field.)*
 - per-type operators + wrong-value-type rejection;
 - `contains` / `endsWith` present **only** where opted in (trigram / reversed index built);
 - multi-valued fields forcing existential `some`;

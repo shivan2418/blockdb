@@ -46,7 +46,7 @@ Every example below queries one collection, `books`, built from records like thi
     "published":  { "kind": "date", "indexed": true },
     "pages":      { "kind": "number", "indexed": true },
     "rating":     { "kind": "number", "indexed": true, "absent": true, "nullable": true },
-    "inStock":    { "kind": "boolean", "indexed": true },
+    "inStock":    { "kind": "boolean" },
     "language":   { "kind": "string", "indexed": true, "values": ["de", "en", "es", "fr"] },
     "tags":       { "kind": "string", "indexed": true, "multi": true,
                     "values": ["fantasy", "fiction", "history", "mystery", "poetry", "romance", "science", "travel"] },
@@ -55,7 +55,7 @@ Every example below queries one collection, `books`, built from records like thi
 }
 ```
 
-`blockdb init` infers almost all of this from the data; you pick the sort field, the primary key and the indexed fields.
+`blockdb init` infers almost all of this from the data; you pick the sort field, the primary key and which filters need to be fast (the indexed fields). `inStock` isn't indexed: it can still be filtered, as a [rider](#riders-filters-that-dont-narrow-the-read).
 
 ## Connecting
 
@@ -101,25 +101,51 @@ await db.books.findMany({
 ```
 
 - **Everything ANDs.** Every field in `where` must match, and every operator on one field must match. There is no OR. See [No OR](#no-or-what-to-do-instead).
-- **Only indexed fields are queryable.** The sort field is always queryable. Other fields need `"indexed": true`. Fields of kind `json` are carried in records but never queryable.
-- **Operators come from the config, not just the type.** A string field only gets `contains` if you opted in. The type system offers exactly what was built, so an operator you can't use is a compile error rather than a slow query.
+- **Every field is queryable**, except fields of kind `json`, which are carried in records but never filtered. Indexing a field doesn't decide whether you can filter on it; it decides whether that filter makes the query cheaper.
+- **Every query needs one filter that narrows which files are read.** Filters that can't are [riders](#riders-filters-that-dont-narrow-the-read): they're fine alongside one that can, and rejected on their own.
+- **Operators come from the field's type and flags.** The type system offers exactly those, so a typo or a range on a text field is a compile error.
+
+## Riders: filters that don't narrow the read
+
+Every filter is one of two kinds:
+
+- A **pruning** filter narrows which data files a query downloads. Filters on the sort field prune, and so do filters an index can answer: `equals`, `in` and `startsWith` on an indexed string, `equals`, `in` and ranges on an indexed number or date, `equals` on an indexed boolean, `endsWith` and `contains` when you opted into their indexes, and the list operators.
+- A **rider** only checks the records that a pruning filter already downloaded. `not` is always a rider, and so are `isNull`, `isAbsent` and `exists`. So is every filter on an unindexed field, and any operator the field has no index for, such as `contains` without `"contains": true` (or with fewer than three characters, which is too short for the trigram index).
+
+Riders are exact: they only ever change which records come back, never whether the right ones do. They're free, too: they cost nothing at build time and add nothing to the download beyond the files the pruning filter already chose.
+
+```ts
+// language prunes; inStock (unindexed) and the author test ride along
+await db.books.findMany({
+  where: { language: { equals: "fr" }, inStock: { equals: true }, author: { not: "Erin Walsh" } },
+});
+```
+
+A `where` made only of riders would have to download every file, so it's rejected. With the generated types that's a compile error. For a `where` built at runtime, such as from UI input, it's a `BlockDbError` with code `NEEDS_PRUNING`, whose message names the fields that can prune. `count` accepts riders on their own, because it never downloads data.
+
+```ts
+await db.books.findMany({ where: { inStock: { equals: true } } }); // ✗ only a rider
+await db.books.count({ inStock: { equals: true } });               // ✓ an upper bound, no download
+```
+
+**When to index a field.** Index it when a filter on it should narrow the read by itself. Leave it unindexed when it's only ever combined with a more selective filter, or when its values are spread across every file anyway: a boolean, or a house number in an address list sorted by street. `blockdb build` warns about an index whose average value appears in most files, because that index costs build output and saves nothing.
 
 ## Which operators a field gets
 
-| Field | Operators |
-|---|---|
-| Sort field, number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` |
-| Sort field, string | the same, plus `startsWith` |
-| Indexed string | `equals` `in` `startsWith` `not`, plus `endsWith` / `contains` if opted in |
-| Indexed number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` |
-| Indexed boolean | `equals` `not` |
-| Indexed list (`"multi": true`) | `some` `every` `hasEvery` `isEmpty` |
-| Indexed, not a list, with `"nullable": true` | also `isNull` `exists` |
-| Indexed, not a list, with `"absent": true` | also `isAbsent` `exists` |
+| Field | Operators | Of those, prune |
+|---|---|---|
+| Sort field, number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` | all but `not` |
+| Sort field, string | the same, plus `startsWith` `endsWith` `contains` | all but `not` `endsWith` `contains` |
+| String | `equals` `in` `startsWith` `endsWith` `contains` `not` | if indexed: `equals` `in` `startsWith`, plus `endsWith` / `contains` if opted in |
+| Number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` | if indexed: all but `not` |
+| Boolean | `equals` `not` | if indexed: `equals` |
+| List (`"multi": true`, always indexed) | `some` `every` `hasEvery` `isEmpty` | all |
+| Not a list or the sort field, with `"nullable": true` | also `isNull` `exists` | none |
+| Not a list or the sort field, with `"absent": true` | also `isAbsent` `exists` | none |
 
 ## Strings
 
-`equals`, `in` and `startsWith` work on every indexed string field and are case-sensitive:
+`equals`, `in` and `startsWith` are case-sensitive, and prune on an indexed string field:
 
 ```ts
 await db.books.findMany({ where: { author: { equals: "Erin Walsh" } } });
@@ -135,7 +161,7 @@ await db.books.findMany({ where: { title: { gte: "Glass", lt: "H" } } });
 
 Other string fields never get ranges, because `gte: "2"` on a column of numeric-looking strings would silently drop `"10"`. Give that data `kind: "number"` instead, or derive a number column (below).
 
-**`endsWith` and `contains` are opt-ins.** Each builds an extra index (`"endsWith": true` builds a reversed index; `"contains": true` builds a trigram index), so they cost build time and deploy size:
+**`endsWith` and `contains` work on every string field; opting in makes them prune.** Without an opt-in they're riders. `"endsWith": true` builds a reversed index and `"contains": true` a trigram index, which cost build time and deploy size, so opt in only where the filter has to narrow the read by itself:
 
 ```ts
 await db.books.findMany({ where: { author: { endsWith: "Walsh" } } });
@@ -161,7 +187,7 @@ await db.books.findMany({ where: { title_fold: { contains: q } } }); // "cafe" f
 
 ## Numbers and dates
 
-Numbers and dates get equality, `in` and ranges on any indexed field. Combine `gt`/`gte` with `lt`/`lte` on one field for a between:
+Numbers and dates get equality, `in` and ranges, which prune on an indexed field. Combine `gt`/`gte` with `lt`/`lte` on one field for a between:
 
 ```ts
 await db.books.findMany({ where: { pages: { gte: 300, lte: 400 } } });
@@ -176,8 +202,10 @@ await db.books.findMany({ where: { published: { gte: "2000-01-01", lt: "2010-01-
 
 ## Booleans
 
+`inStock` isn't indexed in this config, so a filter on it is a rider:
+
 ```ts
-await db.books.findMany({ where: { inStock: { equals: true } } });
+await db.books.findMany({ where: { language: { equals: "de" }, inStock: { equals: true } } });
 ```
 
 ## Missing values: null and absent
@@ -187,18 +215,19 @@ blockdb distinguishes a field that is `null` from one that is missing from the r
 - `"nullable": true`: some records hold `null`. The generated type is `T | null`, and the field gets `isNull` and `exists`.
 - `"absent": true`: some records lack the key. The generated type is optional (`field?: T`), and the field gets `isAbsent` and `exists`.
 
-`rating` is both, so its type is `rating?: number | null` and it gets all three operators:
+`rating` is both, so its type is `rating?: number | null` and it gets all three operators. They're riders, so each needs a filter that prunes beside it:
 
 ```ts
-await db.books.findMany({ where: { rating: { isNull: true } } });   // rating: null
-await db.books.findMany({ where: { rating: { isAbsent: true } } }); // no rating key
-await db.books.findMany({ where: { rating: { exists: true } } });   // has a real value
-await db.books.findMany({ where: { rating: { exists: false } } });  // null or absent
+const fr = { language: { equals: "fr" } } as const;
+await db.books.findMany({ where: { ...fr, rating: { isNull: true } } });   // rating: null
+await db.books.findMany({ where: { ...fr, rating: { isAbsent: true } } }); // no rating key
+await db.books.findMany({ where: { ...fr, rating: { exists: true } } });   // has a real value
+await db.books.findMany({ where: { ...fr, rating: { exists: false } } });  // null or absent
 ```
 
 A missing value never matches a comparison: `rating: { gt: 4.5 }`, `rating: { equals: 5 }` and `rating: { not: 5 }` all skip records whose rating is null or absent.
 
-The flags keep the generated types honest, so `build` enforces them: if your data gains a `null` or loses a key where the config doesn't allow it, the build fails and says which flag to add (or run `blockdb init --reinfer`). The operators are only offered on indexed fields other than the sort field and list fields, but the flags shape the record type on every field.
+The flags keep the generated types honest, so `build` enforces them: if your data gains a `null` or loses a key where the config doesn't allow it, the build fails and says which flag to add (or run `blockdb init --reinfer`). The operators are offered on every field except the sort field and list fields, whose missing values have their own rules; the flags shape the record type on every field.
 
 ## `not`
 
@@ -210,7 +239,7 @@ await db.books.findMany({
 });
 ```
 
-`not` can't use an index (every file might hold a record that isn't Erin Walsh), so it only filters records that other operators already selected. A `where` whose only operator is `not` would read the whole dataset, so it's rejected: a compile error, plus a runtime error for untyped callers. `count` accepts it, because `count` never reads data.
+`not` can't use an index (every file might hold a record that isn't Erin Walsh), so it's always a [rider](#riders-filters-that-dont-narrow-the-read): it only filters records that a pruning filter already selected.
 
 ## List fields
 
@@ -328,7 +357,8 @@ How to keep queries cheap:
 
 - **Choose the sort field for your main access pattern.** Lookups, prefixes and ranges on it are the cheapest queries.
 - **Always pass `limit`** unless you need every match.
-- **Pair broad operators with a selective one.** `not`, `every` and the fragment operators get cheaper when another field narrows the candidates.
+- **Pair broad operators with a selective one.** `every`, the fragment operators and every rider get cheaper when another field narrows the candidates.
+- **Don't index what can't prune.** A filter on an unindexed field still works as a rider. Heed the build's "barely prunes" warnings.
 - **Inspect before deploying.** `blockdb inspect` reports sizes and warnings without rebuilding.
 
 ## Errors
@@ -355,6 +385,7 @@ try {
 | `NETWORK` | `fetch` failed or returned a non-404 error status. `e.status` holds the status if there was one. | Maybe |
 | `CORRUPT_DATA` | A file didn't parse, or didn't decompress (for example, brotli on a host that can't serve it; see the [deploy guide](deploy-guide.md)). | No |
 | `LIMIT_EXCEEDED` | The query would return more than `maxResults`. | No, paginate |
+| `NEEDS_PRUNING` | Every filter in the `where` is a [rider](#riders-filters-that-dont-narrow-the-read), so the query would read the whole dataset. Add a filter that prunes. | No |
 
 Errors carry `e.url` (the file being fetched) where relevant. They never include your `where`, so filter values don't end up in logs. There's no built-in retry: wrap `fetch` instead, as the [deploy guide](deploy-guide.md) shows.
 
@@ -362,10 +393,10 @@ Errors carry `e.url` (the file being fetched) where relevant. They never include
 
 The generated types reject, at compile time:
 
-- a field that isn't queryable: unknown, not indexed, or a `json` payload
-- an operator the field doesn't have, such as `contains` without the opt-in, or a range on a secondary string field
+- a field that isn't queryable: unknown, or a `json` payload
+- an operator the field's type doesn't have, such as a range on a string field other than the sort field
 - a value outside a field's value union
 - `isNull` on a field that isn't `nullable`, `isAbsent` on one that isn't `absent`, and `exists` on one that's neither
-- a `where` whose only operator is `not`
+- a `where` made only of riders, such as only `not`, only `isNull`, or only filters on unindexed fields
 - `get` on a collection without a primary key
 - `orderBy` on a field that isn't queryable

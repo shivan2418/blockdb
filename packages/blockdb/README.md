@@ -26,7 +26,7 @@ const { records, hasMore } = await db.movies.findMany({
 });
 ```
 
-`db.<collection>` is a real, named member with go-to-definition and intellisense on both the field and its available operators — the type system only offers operators the built data actually indexed. See [`examples/`](https://github.com/shivan2418/blockdb/tree/master/examples) in the repo for two complete, working example apps (movie catalog, product lookup) that build → deploy → query in a real browser.
+`db.<collection>` is a real, named member with go-to-definition and intellisense on both the field and its available operators — the type system offers exactly the operators each field's type allows, and rejects a query none of whose filters can narrow which files are read (see [Riders](https://github.com/shivan2418/blockdb/blob/master/docs/query-guide.md#riders-filters-that-dont-narrow-the-read)). See [`examples/`](https://github.com/shivan2418/blockdb/tree/master/examples) in the repo for two complete, working example apps (movie catalog, product lookup) that build → deploy → query in a real browser.
 
 ## Querying
 

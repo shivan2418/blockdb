@@ -12,32 +12,67 @@ import type {
   ZonemapEntry,
 } from "./types.js";
 
-/** The sort field prunes via zonemap alone, so every numeric/date operator is free. */
-const SORT_FIELD_OPERATORS = ["equals", "in", "gt", "gte", "lt", "lte"] as const;
-/** Secondary string fields: values are sorted in the index, so prefix = a contiguous range (ADR-0003 §7). */
-const SECONDARY_STRING_OPERATORS = ["equals", "in", "startsWith"] as const;
 /**
- * Secondary number/date fields. `equals`/`in` are resolved exactly via the inverted index; the range
- * operators are pruned by the per-block `[min,max]` pairs the zonemap already carries (ADR-0003 §6),
- * keeping only blocks whose span overlaps the query interval. Those pairs are stored untruncated for
- * number/date — only string pairs are truncated — so range pruning is exact at block granularity.
- *
- * Ranges are NOT offered on secondary STRING fields, deliberately: string comparison is lexicographic,
- * so `gte: "2"` on a numeric-looking column drops every double-digit value. Only the sort field gets
- * string ranges, where the ordering is the physical one the user chose (and `startsWith` covers the
- * prefix case a sorted string column can actually answer).
+ * What a field accepts, and which of those operators prune (ADR-0013). Every queryable field accepts
+ * every operator its type allows; an index decides only which of them narrow the blocks a query reads.
+ * The rest are riders: they test the records a pruning constraint already selected, which costs
+ * nothing at build time.
  */
-const SECONDARY_RANGE_KIND_OPERATORS = ["equals", "in", "gt", "gte", "lt", "lte"] as const;
-const SECONDARY_BOOLEAN_OPERATORS = ["equals"] as const;
-/** `not` needs no index structure of its own — it's a filter-only rider valid alongside any pruning op (T7/ADR-0004). */
-const RIDER_OPERATOR = "not";
+export interface FieldOperators {
+  /** Everything a `where` may write on this field. */
+  operators: readonly string[];
+  /** The subset that narrows blocks. Empty for an unindexed field. */
+  pruning: readonly string[];
+}
+
+const RANGE_OPERATORS = ["gt", "gte", "lt", "lte"] as const;
+
+/**
+ * The operators each kind allows. String ranges are the one deliberate gap: comparison is
+ * lexicographic, so `gte: "2"` on a numeric-looking column drops every double-digit value. Only a
+ * string SORT field gets them, where that order is the physical one the user chose (ADR-0003 §7).
+ */
+function operatorsForKind(field: FieldConfig, isSortField: boolean): string[] {
+  switch (field.kind) {
+    case "string":
+      return ["equals", "in", ...(isSortField ? RANGE_OPERATORS : []), "startsWith", "endsWith", "contains", "not"];
+    case "number":
+    case "date":
+      return ["equals", "in", ...RANGE_OPERATORS, "not"];
+    case "boolean":
+      return ["equals", "not"];
+    default:
+      return []; // json: payload only (ADR-0001)
+  }
+}
+
+/**
+ * The operators an index structure answers. The sort field's split-points prune equality and ranges,
+ * and a string sort field's prefixes too — a prefix is a contiguous span of its sorted values. A
+ * secondary field's inverted index answers equality and prefixes (strings), its zonemap pairs answer
+ * ranges (number/date: stored untruncated, so exact at block granularity), and the `endsWith`/
+ * `contains` opt-ins build the reversed and trigram indexes those operators prune through.
+ */
+function pruningForKind(field: FieldConfig, isSortField: boolean): string[] {
+  if (isSortField) return ["equals", "in", ...RANGE_OPERATORS, ...(field.kind === "string" ? ["startsWith"] : [])];
+  switch (field.kind) {
+    case "string":
+      return ["equals", "in", "startsWith", ...(field.endsWith ? ["endsWith"] : []), ...(field.contains ? ["contains"] : [])];
+    case "number":
+    case "date":
+      return ["equals", "in", ...RANGE_OPERATORS];
+    case "boolean":
+      return ["equals"];
+    default:
+      return [];
+  }
+}
 
 /**
  * `isNull`/`isAbsent`/`exists`, each offered only when the data can actually be that way: `isNull`
- * for a nullable field, `isAbsent` for one whose key can be missing, `exists` for either. None of
- * them needs an index structure — they filter records the other operators selected. Not offered on
- * the sort field or on list fields, whose missing values have their own rules (ADR-0002 §9,
- * ADR-0010).
+ * for a nullable field, `isAbsent` for one whose key can be missing, `exists` for either. Always
+ * riders. Not offered on the sort field or on list fields, whose missing values have their own rules
+ * (ADR-0002 §9, ADR-0010).
  */
 function missingValueOperators(field: FieldConfig): string[] {
   if (field.multi) return [];
@@ -48,24 +83,9 @@ function missingValueOperators(field: FieldConfig): string[] {
   return ops;
 }
 
-function operatorsForField(field: FieldConfig, isSortField: boolean, indexed: boolean): readonly string[] {
-  if (isSortField) {
-    // A string sort field gets `startsWith` free on top of the range set: its values are sorted, so
-    // a prefix is a contiguous span of the split-points already in the manifest — no index chunk to
-    // fetch. This is the main reason to sort by a name-like field at all.
-    const ops = [...SORT_FIELD_OPERATORS, ...(field.kind === "string" ? (["startsWith"] as const) : [])];
-    return [...ops, RIDER_OPERATOR];
-  }
-  if (!indexed) return [];
-  if (field.kind === "string") {
-    const ops: string[] = [...SECONDARY_STRING_OPERATORS];
-    if (field.endsWith) ops.push("endsWith");
-    if (field.contains) ops.push("contains");
-    ops.push(RIDER_OPERATOR, ...missingValueOperators(field));
-    return ops;
-  }
-  if (field.kind === "boolean") return [...SECONDARY_BOOLEAN_OPERATORS, RIDER_OPERATOR, ...missingValueOperators(field)];
-  return [...SECONDARY_RANGE_KIND_OPERATORS, RIDER_OPERATOR, ...missingValueOperators(field)];
+export function operatorsForField(field: FieldConfig, isSortField: boolean, indexed: boolean): FieldOperators {
+  const operators = [...operatorsForKind(field, isSortField), ...(isSortField ? [] : missingValueOperators(field))];
+  return { operators, pruning: isSortField || indexed ? pruningForKind(field, isSortField) : [] };
 }
 
 /**
@@ -147,11 +167,13 @@ function buildSchemaDescriptor(config: ResolvedConfig): SchemaDescriptor {
   for (const [name, field] of Object.entries(config.fields)) {
     const isSortField = name === config.sortField;
     const indexed = isSortField || field.indexed === true;
+    const { operators, pruning } = operatorsForField(field, isSortField, indexed);
     fields[name] = {
       kind: field.kind,
       isDate: field.kind === "date",
       indexed,
-      operators: operatorsForField(field, isSortField, indexed),
+      operators,
+      pruning,
       ...(field.absent === true ? { absent: true as const } : {}),
       ...(field.nullable === true ? { nullable: true as const } : {}),
       ...(field.multi === true ? { multi: true as const } : {}),

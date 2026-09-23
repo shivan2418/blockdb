@@ -82,12 +82,15 @@ describe("buildManifest", () => {
       isDate: false,
       indexed: true,
       operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"],
+      pruning: ["equals", "in", "gt", "gte", "lt", "lte"],
     });
+    // Unindexed, but still queryable: every filter on it is a rider (ADR-0013).
     expect(manifest.schema.fields.title).toEqual({
       kind: "string",
       isDate: false,
       indexed: false,
-      operators: [],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
+      pruning: [],
     });
   });
 
@@ -121,10 +124,11 @@ describe("buildManifest", () => {
       isDate: true,
       indexed: true,
       operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"],
+      pruning: ["equals", "in", "gt", "gte", "lt", "lte"],
     });
   });
 
-  test("a non-sort field with no `indexed` opt-in is not indexed and has no operators", () => {
+  test("a non-sort field with no `indexed` opt-in accepts its type's operators, none of which prune", () => {
     const manifest = buildManifest({
       config,
       blockFiles,
@@ -132,11 +136,11 @@ describe("buildManifest", () => {
       formatVersion: 0,
       generatorVersion: "0.0.0",
     });
-    expect(manifest.schema.fields.title).toEqual({ kind: "string", isDate: false, indexed: false, operators: [] });
+    expect(manifest.schema.fields.title).toEqual({ kind: "string", isDate: false, indexed: false, operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: [] });
     expect(manifest.indexes).toEqual({});
   });
 
-  test("an opted-in secondary string field gets equals/in/startsWith and merges its zonemap + index directory", () => {
+  test("an opted-in secondary string field prunes equals/in/startsWith and merges its zonemap + index directory", () => {
     const indexedConfig: ResolvedConfig = {
       ...config,
       fields: { ...config.fields, title: { kind: "string", indexed: true } },
@@ -155,11 +159,12 @@ describe("buildManifest", () => {
       kind: "string",
       isDate: false,
       indexed: true,
-      operators: ["equals", "in", "startsWith", "not"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
+      pruning: ["equals", "in", "startsWith"],
     });
     expect(manifest.zonemap.title).toEqual({ pairs: [["Alpha", "Zeta"]], truncated: true });
     expect(manifest.indexes.title).toEqual({
-      operators: ["equals", "in", "startsWith", "not"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
       chunks: [{ from: "Alpha", to: "Zeta", file: "index/title/abc123.json" }],
     });
     // the sort field's own zonemap entry is untouched
@@ -183,6 +188,7 @@ describe("buildManifest", () => {
       isDate: false,
       indexed: true,
       operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"],
+      pruning: ["equals", "in", "gt", "gte", "lt", "lte"],
     });
   });
 
@@ -199,6 +205,7 @@ describe("buildManifest", () => {
       generatorVersion: "0.0.0",
     });
     expect(manifest.schema.fields.released!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not"]);
+    expect(manifest.schema.fields.released!.pruning).toEqual(["equals", "in", "gt", "gte", "lt", "lte"]);
   });
 
   test("a secondary STRING field is deliberately denied ranges — string comparison is lexicographic", () => {
@@ -218,11 +225,11 @@ describe("buildManifest", () => {
       generatorVersion: "0.0.0",
     });
     const ops = manifest.schema.fields.title!.operators;
-    expect(ops).toEqual(["equals", "in", "startsWith", "not"]);
+    expect(ops).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
     for (const rangeOp of ["gt", "gte", "lt", "lte"]) expect(ops).not.toContain(rangeOp);
   });
 
-  test("T6: endsWith opt-in appends the operator and merges the reversed chunk directory", () => {
+  test("T6: endsWith opt-in makes endsWith prune and merges the reversed chunk directory", () => {
     const indexedConfig: ResolvedConfig = {
       ...config,
       fields: { ...config.fields, title: { kind: "string", indexed: true, endsWith: true } },
@@ -237,15 +244,16 @@ describe("buildManifest", () => {
       generatorVersion: "0.0.0",
     });
 
-    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "not"]);
+    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
+    expect(manifest.schema.fields.title!.pruning).toEqual(["equals", "in", "startsWith", "endsWith"]);
     expect(manifest.indexes.title).toEqual({
-      operators: ["equals", "in", "startsWith", "endsWith", "not"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
       chunks: [{ from: "Alpha", to: "Zeta", file: "index/title/abc123.json" }],
       reversed: { chunks: [{ from: "a", to: "z", file: "index/title/reversed/def456.json" }] },
     });
   });
 
-  test("T6: contains opt-in appends the operator and merges the trigram chunk directory", () => {
+  test("T6: contains opt-in makes contains prune and merges the trigram chunk directory", () => {
     const indexedConfig: ResolvedConfig = {
       ...config,
       fields: { ...config.fields, title: { kind: "string", indexed: true, contains: true } },
@@ -260,9 +268,10 @@ describe("buildManifest", () => {
       generatorVersion: "0.0.0",
     });
 
-    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "contains", "not"]);
+    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
+    expect(manifest.schema.fields.title!.pruning).toEqual(["equals", "in", "startsWith", "contains"]);
     expect(manifest.indexes.title).toEqual({
-      operators: ["equals", "in", "startsWith", "contains", "not"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
       chunks: [{ from: "Alpha", to: "Zeta", file: "index/title/abc123.json" }],
       trigram: { chunks: [{ from: "aaa", to: "zzz", file: "index/title/trigram/ghi789.json" }] },
     });
@@ -283,13 +292,13 @@ describe("buildManifest", () => {
       generatorVersion: "0.0.0",
     });
     expect(manifest.indexes.title).toEqual({
-      operators: ["equals", "in", "startsWith", "endsWith", "not"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
       chunks: [],
       reversed: { chunks: [{ from: "a", to: "z", file: "index/title/reversed/def456.json" }] },
     });
   });
 
-  test("an opted-in secondary boolean field gets only equals", () => {
+  test("an opted-in secondary boolean field prunes only equals", () => {
     const indexedConfig: ResolvedConfig = {
       ...config,
       fields: { ...config.fields, isClassic: { kind: "boolean", indexed: true } },
@@ -306,6 +315,7 @@ describe("buildManifest", () => {
       isDate: false,
       indexed: true,
       operators: ["equals", "not"],
+      pruning: ["equals"],
     });
   });
 
@@ -325,7 +335,8 @@ describe("buildManifest", () => {
       kind: "string",
       isDate: false,
       indexed: true,
-      operators: ["equals", "in", "startsWith", "not"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
+      pruning: ["equals", "in", "startsWith"],
       multi: true,
     });
     expect(manifest.schema.fields.title!.multi).toBeUndefined();
@@ -356,20 +367,28 @@ describe("buildManifest", () => {
       kind: "string",
       isDate: false,
       indexed: true,
-      operators: ["equals", "in", "startsWith", "not", "isAbsent", "exists"],
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not", "isAbsent", "exists"],
+      pruning: ["equals", "in", "startsWith"],
       absent: true,
     });
-    expect(fields.subtitle!.operators).toEqual(["equals", "in", "startsWith", "not", "isNull", "exists"]);
+    expect(fields.subtitle!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not", "isNull", "exists"]);
     expect(fields.subtitle!.nullable).toBe(true);
     expect(fields.rating!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not", "isNull", "isAbsent", "exists"]);
+    // Missing-value operators are riders: they never prune.
+    expect(fields.rating!.pruning).toEqual(["equals", "in", "gt", "gte", "lt", "lte"]);
     // The sort field and list fields record the facts (for the record type) but get no missing-value
     // operators: their missing values have their own rules (ADR-0002 §9, ADR-0010).
     expect(fields.year!.operators).not.toContain("isNull");
     expect(fields.year).toMatchObject({ absent: true, nullable: true });
-    expect(fields.tags!.operators).toEqual(["equals", "in", "startsWith", "not"]);
+    expect(fields.tags!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
     expect(fields.tags).toMatchObject({ absent: true, nullable: true });
-    // A non-indexed field has no operators at all, but still records that it can be null.
-    expect(fields.notes).toMatchObject({ indexed: false, operators: [], nullable: true });
+    // An unindexed field is queryable too — every operator a rider — and records that it can be null.
+    expect(fields.notes).toMatchObject({
+      indexed: false,
+      operators: ["equals", "in", "startsWith", "endsWith", "contains", "not", "isNull", "exists"],
+      pruning: [],
+      nullable: true,
+    });
   });
 
   test("a field with neither flag omits both keys entirely", () => {

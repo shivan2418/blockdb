@@ -178,7 +178,10 @@ export interface FieldSchemaEntry {
   kind: FieldKind;
   isDate: boolean;
   indexed: boolean;
+  /** Everything a `where` may write on this field (ADR-0013). */
   operators: readonly string[];
+  /** The subset of `operators` that narrows which blocks a query reads; the rest are riders. */
+  pruning: readonly string[];
   /** Present (`true`) when the key may be missing from a record — omitted otherwise, mirroring the runtime's optional `FieldMeta.absent`. */
   absent?: true;
   /** Present (`true`) when the value may be `null` — omitted otherwise, mirroring the runtime's optional `FieldMeta.nullable`. */

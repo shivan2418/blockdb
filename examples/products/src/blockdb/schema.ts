@@ -18,12 +18,12 @@ export const schema = {
   products: {
     pk: "sku",
     fields: {
-      sku: { kind: "string", operators: ["equals", "in", "startsWith", "not"], pk: true },
-      name: { kind: "string", operators: ["equals", "in", "startsWith", "not"] },
-      category: { kind: "string", operators: ["equals", "in", "startsWith", "not"], values: ["Electronics", "Fitness", "Garden", "Kitchen", "Office", "Outdoors", "Stationery", "Toys"] },
-      price: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"] },
-      inStock: { kind: "boolean", operators: ["equals", "not"] },
-      discountPct: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not", "isAbsent", "exists"], absent: true },
+      sku: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: ["equals", "in", "startsWith"], pk: true },
+      name: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: ["equals", "in", "startsWith"] },
+      category: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: ["equals", "in", "startsWith"], values: ["Electronics", "Fitness", "Garden", "Kitchen", "Office", "Outdoors", "Stationery", "Toys"] },
+      price: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      inStock: { kind: "boolean", operators: ["equals", "not"], pruning: ["equals"] },
+      discountPct: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not", "isAbsent", "exists"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"], absent: true },
     },
   },
 } as const;

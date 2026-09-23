@@ -1,3 +1,5 @@
+import { BlockDbError } from "./errors.js";
+
 /**
  * How the deploy pre-compresses every file it serves (ADR-0002 §8). `"none"` is the default: most
  * hosts apply `Content-Encoding` themselves, which negotiates per client, whereas a pre-compressed
@@ -28,8 +30,14 @@ export type FieldKind = "string" | "number" | "date" | "boolean";
 
 export interface FieldMeta {
   readonly kind: FieldKind;
-  /** The enabled operator names for this field — data, not implied by `kind` (ADR-0003 §7). */
+  /** Every operator a `where` may write on this field (ADR-0013). */
   readonly operators: readonly string[];
+  /**
+   * The subset of `operators` that narrows which blocks a query reads; the others are riders. Always
+   * emitted by codegen. A hand-written schema that omits it falls back to "every operator but `not`
+   * and the missing-value operators prunes".
+   */
+  readonly pruning?: readonly string[];
   /** Multi-valued (string[]) → the list operators `some`/`every`/`hasEvery`/`isEmpty` (ADR-0010). */
   readonly multi?: boolean;
   /** This field is the user PK. */
@@ -68,11 +76,11 @@ export interface SchemaMeta {
  */
 type AllStringOps<V extends string = string> = {
   equals: V;
-  not: V; // filter-only rider
+  not: V; // always a rider
   in: V[];
   startsWith: string;
-  contains: string; // opt-in (trigram index) + prunes
-  endsWith: string; // opt-in (reversed index) + prunes
+  contains: string; // prunes with a trigram index, else a rider
+  endsWith: string; // prunes with a reversed index, else a rider
   // Lexicographic ranges: only a string SORT field is ever granted these (ADR-0003 §7), so PickOps
   // keeps them off secondary string fields, whose operator lists never include them.
   gt: string;
@@ -82,7 +90,7 @@ type AllStringOps<V extends string = string> = {
 };
 type AllNumberOps = {
   equals: number;
-  not: number; // filter-only rider
+  not: number; // always a rider
   in: number[];
   gt: number;
   gte: number;
@@ -92,7 +100,7 @@ type AllNumberOps = {
 type AllDateOps = {
   // dates compare as ISO strings
   equals: string;
-  not: string; // filter-only rider
+  not: string; // always a rider
   in: string[];
   gt: string;
   gte: string;
@@ -101,7 +109,7 @@ type AllDateOps = {
 };
 type AllBoolOps = {
   equals: boolean;
-  not: boolean; // filter-only rider
+  not: boolean; // always a rider
 };
 
 type PickOps<All, Ops extends string> = {
@@ -148,12 +156,12 @@ type FilterFor<F extends FieldMeta> = F extends { kind: "string"; multi: true }
           ? PickOps<AllBoolOps & MissingValueOps, F["operators"][number]>
           : never;
 
-/** The where type: ONLY indexed fields, each with ONLY its valid operators. */
+/** The where type: every queryable field, each with ONLY its valid operators. */
 export type WhereOf<C extends CollectionMeta> = {
   [K in keyof C["fields"]]?: FilterFor<C["fields"][K]>;
 };
 
-/** orderBy over indexed fields only. */
+/** orderBy over every queryable field — sorting happens in memory, so an index doesn't matter (ADR-0013). */
 export type OrderByOf<C extends CollectionMeta> = {
   [K in keyof C["fields"]]?: "asc" | "desc";
 };
@@ -171,35 +179,103 @@ export type ValidateWhere<W, C extends CollectionMeta> = {
 };
 
 // ---------------------------------------------------------------------------
-// Filter-only rider rule (ADR-0003 §7): only `not`/negation cannot prune, so a
-// where whose sole constraint is `not` would force a full scan. Encoded at the
-// type level via a branded required property whose NAME is the fix message.
+// The rider rule (ADR-0013): a filter either PRUNES (narrows which blocks are
+// read — the sort field, or an operator an index answers) or RIDES (tests the
+// records already fetched — `not`, the missing-value operators, and anything
+// on an unindexed field). A where made only of riders would read every block,
+// which ADR-0001 forbids, so it's rejected: at the type level via a branded
+// required property whose NAME is the fix, and at runtime with NEEDS_PRUNING.
 // ---------------------------------------------------------------------------
-type RiderOp = "not";
-type FieldHasPruning<F> = F extends object ? (Exclude<keyof F, RiderOp> extends never ? false : true) : false;
-type FieldHasRider<F> = F extends object ? (Extract<keyof F, RiderOp> extends never ? false : true) : false;
-type AnyPrunes<W> = true extends { [K in keyof W]: FieldHasPruning<NonNullable<W[K]>> }[keyof W] ? true : false;
-type AnyRides<W> = true extends { [K in keyof W]: FieldHasRider<NonNullable<W[K]>> }[keyof W] ? true : false;
-export type RiderGuard<W> = AnyRides<W> extends true
-  ? AnyPrunes<W> extends true
+type RiderOp = "not" | "isNull" | "isAbsent" | "exists";
+type PruningOp<F extends FieldMeta> = F extends { pruning: infer P extends readonly string[] }
+  ? P[number]
+  : Exclude<F["operators"][number], RiderOp>;
+/** A list field's `some`/`every` prune through their element filter; `hasEvery` and `isEmpty` always do. */
+type ElementPrunes<E, F extends FieldMeta> = E extends object
+  ? Extract<keyof E, PruningOp<F>> extends never ? false : true
+  : "equals" extends PruningOp<F> ? true : false;
+type ListFilterPrunes<Filter, F extends FieldMeta> = Extract<keyof Filter, "hasEvery" | "isEmpty"> extends never
+  ? true extends (Filter extends { some: infer E } ? ElementPrunes<E, F> : false) | (Filter extends { every: infer E } ? ElementPrunes<E, F> : false)
+    ? true
+    : false
+  : true;
+type FilterPrunes<Filter, F extends FieldMeta> = Filter extends object
+  ? F extends { multi: true }
+    ? ListFilterPrunes<Filter, F>
+    : Extract<keyof Filter, PruningOp<F>> extends never ? false : true
+  : false;
+type AnyPrunes<W, C extends CollectionMeta> = true extends {
+  [K in keyof W]: K extends keyof C["fields"] ? FilterPrunes<NonNullable<W[K]>, C["fields"][K]> : false;
+}[keyof W]
+  ? true
+  : false;
+export type RiderGuard<W, C extends CollectionMeta> = [keyof W] extends [never]
+  ? {}
+  : AnyPrunes<W, C> extends true
     ? {}
-    : { "❌ add a pruning filter — `not` cannot be the only constraint": never }
-  : {};
+    : { "❌ every filter here is a rider — add one on the sort field or an indexed field, so the query doesn't read every block": never };
 
-// Defense-in-depth: the SAME rule at runtime, for untyped JS callers and
-// dynamically-built where objects the compiler never sees.
-const RIDER_OPS = new Set<string>(["not"]);
-export function assertWhereHasPruning(where: Record<string, Record<string, unknown>> | undefined): void {
+const RUNTIME_RIDER_OPS = new Set(["not", "isNull", "isAbsent", "exists"]);
+
+/** The operators of `field` that prune — from the manifest, or the pre-ADR-0013 rule for a hand-written schema. */
+function pruningOpsOf(field: { operators: readonly string[]; pruning?: readonly string[] }): readonly string[] {
+  return field.pruning ?? field.operators.filter((op) => !RUNTIME_RIDER_OPS.has(op));
+}
+
+/** Whether one element filter of `some`/`every` can use the field's index. */
+function elementPrunes(elementFilter: unknown, pruning: readonly string[]): boolean {
+  if (typeof elementFilter !== "object" || elementFilter === null) return pruning.includes("equals");
+  return Object.keys(elementFilter).some((op) => filterOpPrunes(op, (elementFilter as Record<string, unknown>)[op], pruning));
+}
+
+/**
+ * Whether one operator actually reaches an index structure. `contains` routes on the trigrams of its
+ * argument, so one shorter than three characters has none and can't prune even on a trigram field.
+ */
+function filterOpPrunes(op: string, value: unknown, pruning: readonly string[]): boolean {
+  if (!pruning.includes(op)) return false;
+  return !(op === "contains" && typeof value === "string" && value.length < 3);
+}
+
+/**
+ * The rider rule at runtime (ADR-0013), for untyped JS callers and `where` objects built dynamically
+ * (e.g. from UI input) that the compiler never sees. Throws `NEEDS_PRUNING` naming the fields that
+ * could prune on this dataset.
+ */
+export function assertWhereHasPruning(
+  where: Record<string, Record<string, unknown>> | undefined,
+  schema: { sortField: string; fields: Record<string, { operators: readonly string[]; pruning?: readonly string[]; multi?: true | boolean }> },
+): void {
   if (!where) return;
-  const fields = Object.values(where);
-  if (fields.length === 0) return;
-  const hasPruning = fields.some((filter) => Object.keys(filter ?? {}).some((op) => !RIDER_OPS.has(op)));
-  if (!hasPruning) {
-    throw new Error(
-      "blockdb: `not` cannot be the only constraint — " +
-        "add a pruning filter (equals / in / startsWith / contains / endsWith / range / some / every / hasEvery / isEmpty).",
-    );
-  }
+  const entries = Object.entries(where).filter(([, filter]) => filter !== undefined);
+  if (entries.length === 0) return;
+
+  const prunes = entries.some(([field, filter]) => {
+    const meta = schema.fields[field];
+    if (!meta) return false;
+    const pruning = pruningOpsOf(meta);
+    return Object.entries(filter ?? {}).some(([op, value]) => {
+      if (meta.multi) {
+        if (op === "hasEvery" || op === "isEmpty") return true;
+        if (op === "some" || op === "every") return elementPrunes(value, pruning);
+        return false;
+      }
+      return filterOpPrunes(op, value, pruning);
+    });
+  });
+  if (prunes) return;
+
+  const prunable = Object.entries(schema.fields)
+    .filter(([name, meta]) => name !== schema.sortField && pruningOpsOf(meta).length > 0)
+    .map(([name]) => name);
+  throw new BlockDbError({
+    code: "NEEDS_PRUNING",
+    message:
+      `blockdb: every filter in this where is a rider (it tests fetched records but can't narrow which blocks are read), ` +
+      `so the query would read the whole dataset. Add a filter on the sort field "${schema.sortField}"` +
+      (prunable.length > 0 ? ` or on an indexed field (${prunable.join(", ")})` : "") +
+      `. See "Riders" in docs/query-guide.md.`,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +301,7 @@ type GetMember<C extends CollectionMeta, Rec> = PkField<C> extends never
 // `get(id)` (T8, conditional on a declared PK).
 // ---------------------------------------------------------------------------
 export interface FindManyArgs<C extends CollectionMeta, W extends WhereOf<C>> {
-  where?: W & ValidateWhere<W, C> & RiderGuard<W>;
+  where?: W & ValidateWhere<W, C> & RiderGuard<W, C>;
   orderBy?: OrderByOf<C>;
   limit?: number;
   offset?: number;
@@ -270,9 +346,9 @@ export interface CountOptions {
 
 interface CollectionBase<C extends CollectionMeta, Rec> {
   findMany<W extends WhereOf<C>>(args?: FindManyArgs<C, W>): Promise<FindManyResult<Rec>>;
-  // No RiderGuard here, deliberately: a `not`-only where cannot refine an
-  // un-fetched count, so it just widens the upper bound (ADR-0008 §3) — count
-  // never full-scans, so the rider rule has nothing to guard.
+  // No RiderGuard here, deliberately: count reads only the manifest, so a
+  // rider-only where just widens the upper bound (ADR-0008 §3) — count never
+  // downloads the dataset, so the rider rule has nothing to guard (ADR-0013).
   count<W extends WhereOf<C>>(where?: W & ValidateWhere<W, C>, opts?: CountOptions): Promise<CountResult>;
   getSchema(): C;
 }

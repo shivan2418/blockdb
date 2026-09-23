@@ -471,8 +471,8 @@ describe("stage order — what you filter on is asked BEFORE the sort field", ()
     return state;
   }
 
-  test("STAGE_LABELS puts Filter fields before Sort field", () => {
-    expect(STAGE_LABELS[FILTER_STAGE]).toBe("Filter fields");
+  test("STAGE_LABELS puts Fast filters before Sort field", () => {
+    expect(STAGE_LABELS[FILTER_STAGE]).toBe("Fast filters");
     expect(STAGE_LABELS[SORT_STAGE]).toBe("Sort field");
   });
 

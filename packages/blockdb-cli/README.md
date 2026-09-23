@@ -62,7 +62,7 @@ A derived field is a column `build` computes from another field before partition
 
 ### Typing json payloads
 
-Fields of `kind: "json"` are payload-only: stored and returned in full, but not queryable (only indexed fields are). Codegen types them as `unknown`, which is honest but means the part of the record holding your nested data is the one part that isn't typed. Declare a `tsType` to fix that:
+Fields of `kind: "json"` are payload-only: stored and returned in full, but never filtered (every other field is). Codegen types them as `unknown`, which is honest but means the part of the record holding your nested data is the one part that isn't typed. Declare a `tsType` to fix that:
 
 ```jsonc
 {

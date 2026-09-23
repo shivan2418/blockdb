@@ -20,7 +20,7 @@ Six stages: **detect → sort field → filter fields → text search → file s
 ### 2. Interaction model
 - **`←/→` move between stages; `↑/↓` move within a step; `space` chooses/toggles; `Enter` advances the detect screen and writes on review.**
 - **Sort field** — single-select list; the heuristic-recommended field (ADR-0002 §2: prefer number/date + high cardinality, PK tiebreak) is marked, not forced.
-- **Filter fields** — multi-select list (queryable ⟺ indexed). Shows per-field cost (always-paid vs pay-on-use).
+- **Filter fields** — multi-select list (queryable ⟺ indexed). Shows per-field cost (always-paid vs pay-on-use). *(Amended 2026-09-23, ADR-0013: now "Fast filters". Every field is filterable, and this step picks which filters get an index so they prune.)*
 - **Text search** — a **flat checklist**, one row per (field × operator), each toggled with `space` exactly like the filter list. This replaced an earlier focused-card + `e`/`c` letter-key design that tested as unintuitive. Rows carry a plain description and the live extra-index cost; the **`contains` row turns red with a "bigger than the data" warning** when its trigram index would exceed the field's own column (ADR-0003 §7). `endsWith`/`contains` are off by default and each unlocks its operator in the generated types (T5).
 - **File size** — a `↑/↓` list of byte targets, each showing its resulting file count; default from ADR-0002 §5's `clamp(max(2MB, p95), 512KB, 8MB)`.
 - **Review** — leads with a plain-language summary + any warnings; the config file to be written is **collapsed by default** (expand/preview on demand), so the summary is the focus, not a wall of JSON.

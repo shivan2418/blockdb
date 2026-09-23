@@ -513,7 +513,7 @@ describe("seam #2 — endsWith (reversed index) & contains (trigram index), over
     expect(result.records.map((r) => r.title)).toEqual(["The Matrix"]);
   });
 
-  test("a contains substring shorter than 3 chars can't route via the trigram index but still matches correctly (falls back to a full scan)", async () => {
+  test("a contains substring shorter than 3 chars has no trigrams to route on, so it's a rider", async () => {
     const { outputDir, clientOutDir } = build(t6Config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
     const schema = await loadGeneratedSchema(clientOutDir);
     const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, {
@@ -521,8 +521,11 @@ describe("seam #2 — endsWith (reversed index) & contains (trigram index), over
       fetch: diskFetch([]),
     });
 
-    const result = await client.movies.findMany({ where: { title: { contains: "By" } } });
-    expect(result.records).toEqual([]);
+    // Alone it would read every block, so it's rejected (ADR-0013)...
+    await expect(client.movies.findMany({ where: { title: { contains: "By" } } })).rejects.toMatchObject({ code: "NEEDS_PRUNING" });
+    // ...but it still filters correctly alongside a pruning constraint.
+    const result = await client.movies.findMany({ where: { year: { gte: 1900 }, title: { contains: "at" } } });
+    expect(result.records.map((r) => r.title).sort()).toEqual(MOVIES.filter((m) => m.title.includes("at")).map((m) => m.title).sort());
   });
 
   test("a query with no true match returns no records and fetches no blocks for a fully-disjoint AND", async () => {
@@ -961,16 +964,20 @@ describe("seam #2 — absentable ops, multi-valued some & not rider (T7), over a
       fetch: diskFetch([]),
     });
 
+    // The missing-value operators are riders (ADR-0013), so each rides on a sort-field range that
+    // covers the whole fixture.
+    const allYears = { year: { gte: 1900 } };
+
     // Snatch alone carries an explicit `tagline: null`.
-    const nullResult = await client.movies.findMany({ where: { tagline: { isNull: true } } });
+    const nullResult = await client.movies.findMany({ where: { ...allYears, tagline: { isNull: true } } });
     expect(nullResult.records.map((r) => r.title)).toEqual(["Snatch"]);
 
     // Gladiator alone omits `tagline` entirely.
-    const absentResult = await client.movies.findMany({ where: { tagline: { isAbsent: true } } });
+    const absentResult = await client.movies.findMany({ where: { ...allYears, tagline: { isAbsent: true } } });
     expect(absentResult.records.map((r) => r.title)).toEqual(["Gladiator"]);
 
     // Every other movie carries a real tagline.
-    const existsResult = await client.movies.findMany({ where: { tagline: { exists: true } } });
+    const existsResult = await client.movies.findMany({ where: { ...allYears, tagline: { exists: true } } });
     expect(existsResult.records.map((r) => r.title).sort()).toEqual(
       ["The Matrix", "The Dark Knight", "Inception"].sort(),
     );
@@ -1005,7 +1012,7 @@ describe("seam #2 — absentable ops, multi-valued some & not rider (T7), over a
     expect(result.records.map((r) => r.title)).toEqual(["Snatch"]);
   });
 
-  test("assertWhereHasPruning rejects a dynamically-built not-only where at the client boundary, before any fetch", async () => {
+  test("a where made only of riders is rejected with NEEDS_PRUNING before any index or block fetch", async () => {
     writeT7Fixture();
     const { outputDir, clientOutDir } = build(t7Config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
     const schema = await loadGeneratedSchema(clientOutDir);
@@ -1016,11 +1023,14 @@ describe("seam #2 — absentable ops, multi-valued some & not rider (T7), over a
     });
 
     // Bypasses the compile-time RiderGuard the way an untyped/dynamically-built where would.
-    const notOnlyWhere = { title: { not: "Gladiator" } };
-    await expect(client.movies.findMany({ where: notOnlyWhere as never })).rejects.toThrow(
-      /cannot be the only constraint/,
-    );
-    expect(requests).toEqual([]);
+    for (const riderOnly of [{ title: { not: "Gladiator" } }, { tagline: { isNull: true } }, { tagline: { exists: false }, title: { not: "x" } }]) {
+      const error = await client.movies.findMany({ where: riderOnly as never }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(BlockDbError);
+      expect((error as BlockDbError).code).toBe("NEEDS_PRUNING");
+      expect((error as BlockDbError).message).toMatch(/sort field "year"/);
+    }
+    // Only the manifest — it's what says which filters prune on this dataset.
+    expect(requests.every((url) => url.endsWith("manifest.json"))).toBe(true);
   });
 });
 
@@ -1287,3 +1297,52 @@ function diskFetchBinaryWithHeaders(requests: string[], headers: Record<string, 
     }
   }) as typeof fetch;
 }
+
+describe("seam #2 — riders: unindexed fields are queryable (ADR-0013)", () => {
+  async function connect(requests: string[] = []) {
+    // `config` indexes nothing but the sort field: title and rating are unindexed.
+    const { outputDir, clientOutDir, manifest } = build(config, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const schema = await loadGeneratedSchema(clientOutDir);
+    const client = createClient<typeof schema, { movies: (typeof MOVIES)[number] }>(schema, { basePath: outputDir, fetch: diskFetch(requests) });
+    return { client, manifest, outputDir };
+  }
+
+  test("an unindexed field filters exactly, riding on a sort-field constraint, and reads no more blocks than the sort filter allows", async () => {
+    const requests: string[] = [];
+    const { client, manifest } = await connect(requests);
+    const { records } = await client.movies.findMany({ where: { year: { gte: 2000, lte: 2003 }, rating: { gte: 8.4 }, title: { contains: "a" } } });
+
+    const expected = MOVIES.filter((m) => m.year >= 2000 && m.year <= 2003 && m.rating >= 8.4 && m.title.includes("a"));
+    expect(records.map((r) => r.title).sort()).toEqual(expected.map((m) => m.title).sort());
+    const blocksRead = requests.filter((url) => url.includes("/blocks/")).length;
+    expect(blocksRead).toBeLessThan(manifest.blocks.length);
+  });
+
+  test("an unindexed field alone is rejected with NEEDS_PRUNING", async () => {
+    const { client } = await connect();
+    await expect(client.movies.findMany({ where: { title: { equals: "Gladiator" } } as never })).rejects.toMatchObject({
+      code: "NEEDS_PRUNING",
+    });
+  });
+
+  test("orderBy works on an unindexed field", async () => {
+    const { client } = await connect();
+    const { records } = await client.movies.findMany({ where: { year: { gte: 1900 } }, orderBy: { rating: "desc" } });
+    expect(records.map((r) => r.rating)).toEqual([...MOVIES].map((m) => m.rating).sort((a, b) => b - a));
+  });
+
+  test("count accepts a rider-only where — it downloads nothing — and reports an inexact bound", async () => {
+    const { client } = await connect();
+    expect(await client.movies.count({ title: { equals: "Gladiator" } })).toEqual({ count: MOVIES.length, exact: false });
+  });
+
+  test("a manifest built before ADR-0013 (no pruning lists) is refused with FORMAT_VERSION", async () => {
+    const { client, outputDir } = await connect();
+    const manifestPath = path.join(outputDir, "manifest.json");
+    const legacy = JSON.parse(await readFile(manifestPath, "utf8")) as { schema: { fields: Record<string, { pruning?: unknown }> } };
+    for (const field of Object.values(legacy.schema.fields)) delete field.pruning;
+    writeFileSync(manifestPath, JSON.stringify(legacy));
+
+    await expect(client.movies.findMany({ where: { year: { equals: 2000 } } })).rejects.toMatchObject({ code: "FORMAT_VERSION" });
+  });
+});

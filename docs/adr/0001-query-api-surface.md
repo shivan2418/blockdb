@@ -29,6 +29,8 @@ Rationale:
 
 ### Operators (per type; queryable ⟺ indexed — only indexed fields appear in `where`)
 
+*(Amended 2026-09-23, ADR-0013: every non-json scalar field is queryable; an index decides only which filters prune. A filter that can't prune is a rider, and a `findMany` `where` needs at least one pruning constraint.)*
+
 - **string:** `equals`, `not`, `in`, `contains`, `startsWith`, `endsWith`
 - **number:** `equals`, `not`, `in`, `gt`, `gte`, `lt`, `lte`
 - **date** (string + `isDate`, compared as ISO): `equals`, `not`, `in`, `gt`, `gte`, `lt`, `lte`

@@ -10,8 +10,8 @@ const manifest: Manifest = {
     collection: "movies",
     sortField: "year",
     fields: {
-      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"] },
-      title: { kind: "string", isDate: false, indexed: false, operators: [] },
+      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      title: { kind: "string", isDate: false, indexed: false, operators: [], pruning: [] },
     },
   },
   blocks: [{ hash: "abc123", bytes: 10, count: 2 }],
@@ -31,9 +31,9 @@ describe("generateSchemaTs", () => {
     expect(output).toMatch(/title:\s*string;/);
   });
 
-  test("the schema const's fields map includes ONLY indexed fields", () => {
+  test("the schema const's fields map includes only queryable fields, each with what prunes", () => {
     const schemaBlock = output.slice(output.indexOf("export const schema"));
-    expect(schemaBlock).toContain('year: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte"] }');
+    expect(schemaBlock).toContain('year: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] }');
     expect(schemaBlock).not.toMatch(/\btitle:/);
   });
 
@@ -49,8 +49,8 @@ describe("generateSchemaTs — multi/absent (T7)", () => {
       ...manifest.schema,
       fields: {
         ...manifest.schema.fields,
-        genres: { kind: "string", isDate: false, indexed: true, operators: ["equals", "in", "startsWith", "not"], multi: true },
-        tagline: { kind: "string", isDate: false, indexed: true, operators: ["equals", "in", "startsWith", "not"], absent: true },
+        genres: { kind: "string", isDate: false, indexed: true, operators: ["equals", "in", "startsWith", "not"], pruning: ["equals", "in", "startsWith"], multi: true },
+        tagline: { kind: "string", isDate: false, indexed: true, operators: ["equals", "in", "startsWith", "not"], pruning: ["equals", "in", "startsWith"], absent: true },
       },
     },
   };
@@ -130,7 +130,7 @@ describe("generateSchemaTs — payload-only json fields", () => {
       ...manifest.schema,
       fields: {
         ...manifest.schema.fields,
-        image_uris: { kind: "json", isDate: false, indexed: false, operators: [] },
+        image_uris: { kind: "json", isDate: false, indexed: false, operators: [], pruning: [] },
       },
     },
   };
@@ -157,7 +157,7 @@ describe("generateSchemaTs — tsType escape hatch for json payloads", () => {
           kind: "json",
           isDate: false,
           indexed: false,
-          operators: [],
+          operators: [], pruning: [],
           tsType: "ImageUris",
           tsImport: 'import type { ImageUris } from "../types/scryfall.js";',
         },
@@ -165,7 +165,7 @@ describe("generateSchemaTs — tsType escape hatch for json payloads", () => {
           kind: "json",
           isDate: false,
           indexed: false,
-          operators: [],
+          operators: [], pruning: [],
           tsType: "Record<string, string | null>",
         },
         // a second field importing from the same module must not duplicate the import
@@ -173,7 +173,7 @@ describe("generateSchemaTs — tsType escape hatch for json payloads", () => {
           kind: "json",
           isDate: false,
           indexed: false,
-          operators: [],
+          operators: [], pruning: [],
           tsType: "CardFace[]",
           tsImport: 'import type { ImageUris } from "../types/scryfall.js";',
         },
@@ -243,14 +243,14 @@ describe("generateSchemaTs — enum-like value unions", () => {
           kind: "string",
           isDate: false,
           indexed: true,
-          operators: ["equals", "in", "startsWith"],
+          operators: ["equals", "in", "startsWith"], pruning: ["equals", "in", "startsWith"],
           values: ["G", "PG", "R"],
         },
         genres: {
           kind: "string",
           isDate: false,
           indexed: true,
-          operators: ["equals", "in", "startsWith"],
+          operators: ["equals", "in", "startsWith"], pruning: ["equals", "in", "startsWith"],
           multi: true,
           values: ["Drama", "SciFi"],
         },
@@ -298,7 +298,7 @@ describe("generateSchemaTs — enum-like value unions", () => {
             kind: "string",
             isDate: false,
             indexed: true,
-            operators: ["equals"],
+            operators: ["equals"], pruning: ["equals"],
             values: ["black", "white"],
           },
         },
@@ -313,7 +313,7 @@ describe("generateSchemaTs — enum-like value unions", () => {
 describe("generateSchemaTs — valuesType shares one union across fields", () => {
   const field = (values: string[], valuesType?: string) => ({
     kind: "string" as const, isDate: false, indexed: true,
-    operators: ["equals", "in", "startsWith"], values,
+    operators: ["equals", "in", "startsWith"], pruning: ["equals", "in", "startsWith"], values,
     ...(valuesType ? { valuesType } : {}),
   });
   const shared: Manifest = {
@@ -360,7 +360,7 @@ describe("generateSchemaTs — valuesType shares one union across fields", () =>
 
 describe("generateSchemaTs — generated type names are PascalCase", () => {
   const valued = (values: string[]) => ({
-    kind: "string" as const, isDate: false, indexed: true, operators: ["equals", "in"], values,
+    kind: "string" as const, isDate: false, indexed: true, operators: ["equals", "in"], pruning: ["equals", "in"], values,
   });
   const withFields = (fields: Record<string, ReturnType<typeof valued>>): Manifest => ({
     ...manifest,

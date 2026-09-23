@@ -550,9 +550,10 @@ export function createClient<S extends SchemaMeta, Records>(
   const makeCollection = (meta: CollectionMeta) => {
     const collection: Record<string, unknown> = {
       findMany: async (args?: RawFindManyArgs) => {
-        assertWhereHasPruning(args?.where);
         assertLimitWithinCeiling(args?.limit, maxResults);
         const manifest = await getManifest();
+        // After the manifest (which says what prunes on this dataset), before any index or block fetch.
+        assertWhereHasPruning(args?.where, manifest.schema);
         const ctx = makeFetchContext(basePath, fetchImpl);
         return executeFindMany(manifest, ctx, args, maxResults);
       },

@@ -40,8 +40,8 @@ const manifest: Manifest = {
     collection: "movies",
     sortField: "year",
     fields: {
-      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"] },
-      title: { kind: "string", isDate: false, indexed: true, operators: ["equals", "in", "startsWith"] },
+      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      title: { kind: "string", isDate: false, indexed: true, operators: ["equals", "in", "startsWith"], pruning: ["equals", "in", "startsWith"] },
     },
   },
   blocks: [
@@ -361,6 +361,18 @@ describe("createClient / findMany — reversed & trigram indexes (T6, endsWith/c
 
   const t6Manifest: Manifest = {
     ...manifest,
+    // The endsWith/contains opt-ins make those operators prune (ADR-0013).
+    schema: {
+      ...manifest.schema,
+      fields: {
+        ...manifest.schema.fields,
+        title: {
+          ...manifest.schema.fields.title!,
+          operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"],
+          pruning: ["equals", "in", "startsWith", "endsWith", "contains"],
+        },
+      },
+    },
     indexes: {
       title: {
         ...manifest.indexes.title!,
@@ -568,7 +580,7 @@ describe("createClient / failure contract — hard-fail + shared abort (T5, ADR-
         ...manifest.schema,
         fields: {
           ...manifest.schema.fields,
-          genre: { kind: "string", isDate: false, indexed: true, operators: ["equals"] },
+          genre: { kind: "string", isDate: false, indexed: true, operators: ["equals"], pruning: ["equals"] },
         },
       },
     };
@@ -785,9 +797,9 @@ const walkManifest: Manifest = {
     collection: "movies",
     sortField: "year",
     fields: {
-      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"] },
-      title: { kind: "string", isDate: false, indexed: false, operators: [] },
-      rating: { kind: "number", isDate: false, indexed: false, operators: [] },
+      year: { kind: "number", isDate: false, indexed: true, operators: ["equals", "in", "gt", "gte", "lt", "lte"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      title: { kind: "string", isDate: false, indexed: false, operators: [], pruning: [] },
+      rating: { kind: "number", isDate: false, indexed: false, operators: [], pruning: [] },
     },
   },
   blocks: Array.from({ length: WALK_BLOCKS }, (_, s) => ({

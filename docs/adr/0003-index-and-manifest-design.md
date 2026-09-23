@@ -64,7 +64,7 @@ ADR-0001 made v1.0 implicit-AND. The planner combines `where` keys on one econom
 
 ### 7. Operator coverage — configurable, with cost (refines ADR-0001)
 
-Each operator is available **iff its supporting structure was built** — generalizing T1's "queryable ⟺ indexed." The typed client (T5) exposes only the operators enabled per field.
+Each operator is available **iff its supporting structure was built** — generalizing T1's "queryable ⟺ indexed." The typed client (T5) exposes only the operators enabled per field. *(Amended 2026-09-23, ADR-0013: every operator is now available on every queryable field; its structure decides only whether it **prunes**. Without one it is a rider, like `not`. The manifest lists the pruning subset per field as `pruning`.)*
 
 | Operator | Structure | Cost | Default |
 |---|---|---|---|

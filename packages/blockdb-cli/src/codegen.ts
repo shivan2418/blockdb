@@ -97,17 +97,20 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
     })
     .join("\n");
 
-  const indexedFieldLines = fieldEntries
-    .filter(([, field]) => field.indexed)
+  // Every queryable field, indexed or not: an unindexed field is filterable too, its filters just
+  // don't prune (ADR-0013). `pruning` is what the runtime's rider guard reads.
+  const queryableFieldLines = fieldEntries
+    .filter(([, field]) => field.operators.length > 0)
     .map(([name, field]) => {
       const operators = field.operators.map((op) => `"${op}"`).join(", ");
+      const pruning = field.pruning.map((op) => `"${op}"`).join(", ");
       const multi = field.multi ? ", multi: true" : "";
       const absent = field.absent ? ", absent: true" : "";
       const nullable = field.nullable ? ", nullable: true" : "";
       const pk = field.pk ? ", pk: true" : "";
       // The runtime reads this tuple to narrow equals/in/some to the field's value union.
       const values = field.values ? `, values: [${field.values.map((v) => JSON.stringify(v)).join(", ")}]` : "";
-      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}]${multi}${absent}${nullable}${pk}${values} },`;
+      return `      ${propKey(name)}: { kind: "${field.kind}", operators: [${operators}], pruning: [${pruning}]${multi}${absent}${nullable}${pk}${values} },`;
     })
     .join("\n");
 
@@ -123,7 +126,7 @@ export function generateSchemaTs(manifest: Manifest, generatorVersion: string): 
    * the name they get. Narrowing is unaffected either way — `where` reads the `values` tuple in the
    * schema const below, not these aliases.
    */
-  const valued = fieldEntries.filter(([, field]) => field.indexed && field.values !== undefined);
+  const valued = fieldEntries.filter(([, field]) => field.operators.length > 0 && field.values !== undefined);
   const unionOf = (values: readonly string[]): string => values.map((v) => JSON.stringify(v)).join(" | ");
 
   const sharedNames: string[] = [];
@@ -160,7 +163,7 @@ export interface Records {
 export const schema = {
   ${collectionKey}: {
 ${pkLine}    fields: {
-${indexedFieldLines}
+${queryableFieldLines}
     },
   },
 } as const;

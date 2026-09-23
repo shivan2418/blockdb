@@ -48,6 +48,24 @@ export function unselectiveTextIndexWarning(
 }
 
 /**
+ * The same measurement for a field's plain index (ADR-0013). Since an unindexed field is still
+ * queryable — its filters ride on a pruning constraint — an index that doesn't prune is pure cost:
+ * build output, manifest bytes, and a chunk fetch per query. The house-number shape: sorted by street,
+ * every common number sits in nearly every block.
+ */
+export function unselectiveIndexWarning(field: string, meanPostings: number | undefined, blockCount: number): string | undefined {
+  if (meanPostings === undefined || blockCount < MIN_BLOCKS_FOR_SELECTIVITY) return undefined;
+  const ratio = meanPostings / blockCount;
+  if (ratio <= UNSELECTIVE_POSTINGS_RATIO) return undefined;
+  return (
+    `blockdb: index(${field}): this index barely prunes — the average value appears in ` +
+    `${Math.round(meanPostings)} of ${blockCount} data files (${Math.round(ratio * 100)}%). Consider removing ` +
+    `"indexed": true: "${field}" stays filterable as a rider next to a filter that prunes, and the build ` +
+    `drops this index's files.`
+  );
+}
+
+/**
  * Warns about a text index whose field's values cannot support it, judged from their SHAPE rather than
  * from the field's name. This fires at choice time — before a build exists — and complements
  * `unselectiveTextIndexWarning`, which measures the built structure and so can only report afterwards.

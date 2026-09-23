@@ -16,11 +16,13 @@ export interface Records {
 export const schema = {
   movies: {
     fields: {
-      title: { kind: "string", operators: ["equals", "in", "startsWith", "contains", "not"] },
-      year: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"] },
-      rating: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"] },
-      director: { kind: "string", operators: ["equals", "in", "startsWith", "not"] },
-      genres: { kind: "string", operators: ["equals", "in", "startsWith", "not"], multi: true },
+      id: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: [] },
+      title: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: ["equals", "in", "startsWith", "contains"] },
+      year: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      rating: { kind: "number", operators: ["equals", "in", "gt", "gte", "lt", "lte", "not"], pruning: ["equals", "in", "gt", "gte", "lt", "lte"] },
+      director: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: ["equals", "in", "startsWith"] },
+      genres: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: ["equals", "in", "startsWith"], multi: true },
+      overview: { kind: "string", operators: ["equals", "in", "startsWith", "endsWith", "contains", "not"], pruning: [] },
     },
   },
 } as const;

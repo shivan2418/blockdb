@@ -26,7 +26,7 @@ import type { FieldConfig, FieldKind } from "./types.js";
 export const CHUNK_STEPS = [65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152, 4_194_304, 8_388_608];
 
 /**
- * Filter fields comes BEFORE Sort field deliberately (ADR-0002 §2). The sort field decides which
+ * Fast filters comes BEFORE Sort field deliberately (ADR-0002 §2). The sort field decides which
  * records are stored next to each other, so the only way to choose it well is to know what the user
  * filters on — asking for it first meant recommending locality before knowing what locality was for,
  * which is how a bulk-maintenance timestamp wins.
@@ -47,7 +47,7 @@ export const CHUNK_STEPS = [65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_
  */
 export const ESTIMATE_SAMPLE_MAX = 2000;
 
-export const STAGE_LABELS = ["Detect", "Filter fields", "Sort field", "Text search", "File size", "Review"] as const;
+export const STAGE_LABELS = ["Detect", "Fast filters", "Sort field", "Text search", "File size", "Review"] as const;
 export const LAST_STAGE = STAGE_LABELS.length - 1;
 const FILTER_STAGE = 1;
 const SORT_STAGE = 2;
@@ -940,8 +940,9 @@ function renderFilterFields(data: WizardData, state: WizardState, estimate: Wiza
   // looks like the wizard lost them.
   const payloadOnlyCount = data.fields.filter((f) => f.kind === "json").length;
   const header = [
-    bold("Which fields do you want to filter on?"),
-    dim("  Only indexed fields are queryable. Each one adds a little to the first download, plus an index that loads only when a query uses it."),
+    bold("Which filters need to be fast?"),
+    dim("  Every field stays filterable. The ones you pick get an index, so a filter on them narrows which files a query reads."),
+    dim("  Each adds a little to the first download, plus an index that loads only when a query uses it."),
     ...(payloadOnlyCount > 0
       ? [
           dim(

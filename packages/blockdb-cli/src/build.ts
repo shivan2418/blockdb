@@ -23,6 +23,7 @@ import {
   lowCardinalitySortFieldWarning,
   oversizedRecordWarning,
   skewedBlocksWarning,
+  unselectiveIndexWarning,
   unselectiveTextIndexWarning,
 } from "./warnings.js";
 import { spillOversizedZonemaps } from "./zonemap-budget.js";
@@ -192,6 +193,11 @@ export function materialize(
     secondaryZonemaps[name] = built.zonemap;
     if (built.emptyBlocks) emptyBlocks[name] = built.emptyBlocks;
     indexChunkDirs[name] = addIndexChunks(name, null, built.chunks);
+    // A list field can't be unindexed (ADR-0010), so there's no cheaper alternative to suggest.
+    if (resolved.fields[name]!.multi !== true) {
+      const unselectiveIndex = unselectiveIndexWarning(name, meanPostingsLength(built.chunks), blocks.length);
+      if (unselectiveIndex) warnings.push(unselectiveIndex);
+    }
 
     if (built.reversedChunks) {
       reversedChunkDirs[name] = addIndexChunks(name, "reversed", built.reversedChunks);

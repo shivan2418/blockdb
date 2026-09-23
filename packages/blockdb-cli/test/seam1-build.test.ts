@@ -217,8 +217,12 @@ describe("seam #1 — config + NDJSON → build artifacts", () => {
       "lt",
       "lte",
       "startsWith",
+      "endsWith",
+      "contains",
       "not",
     ]);
+    // endsWith/contains ride; everything the split-points answer prunes (ADR-0013).
+    expect(manifest.schema.fields.title!.pruning).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "startsWith"]);
     // ...and it prunes via split-points, not an inverted index
     expect(manifest.indexes.title).toBeUndefined();
 
@@ -322,7 +326,8 @@ describe("seam #1 — secondary inverted index & zonemap (T3)", () => {
     const { manifest, outputDir } = build(indexedConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
 
     expect(manifest.schema.fields.title!.indexed).toBe(true);
-    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "not"]);
+    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
+    expect(manifest.schema.fields.title!.pruning).toEqual(["equals", "in", "startsWith"]);
     expect(manifest.indexes.title!.chunks.length).toBeGreaterThan(0);
 
     for (const chunk of manifest.indexes.title!.chunks) {
@@ -488,10 +493,67 @@ describe("seam #1 — endsWith (reversed index) & contains (trigram index) opt-i
       },
     };
     const { manifest, warnings } = build(endsWithOnly, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
-    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "not"]);
+    expect(manifest.schema.fields.title!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
+    expect(manifest.schema.fields.title!.pruning).toEqual(["equals", "in", "startsWith", "endsWith"]);
     expect(manifest.indexes.title!.reversed).toBeDefined();
     expect(manifest.indexes.title!.trigram).toBeUndefined();
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("seam #1 — unindexed fields and useless indexes (ADR-0013)", () => {
+  const flags = Array.from({ length: 200 }, (_, i) => ({ id: i, even: i % 2 === 0, bucket: `b${Math.floor(i / 10)}`, parity: [i % 2 === 0 ? "even" : "odd"] }));
+  const flagConfig: BlockDbConfig = {
+    collection: "flags",
+    input: { path: "flags.ndjson" },
+    blockBytes: 300, // many small blocks
+    schema: {
+      sortField: "id",
+      fields: {
+        id: { kind: "number" },
+        even: { kind: "boolean", indexed: true }, // both values in every block: prunes nothing
+        bucket: { kind: "string", indexed: true }, // each value in one or two blocks: prunes well
+        parity: { kind: "string", indexed: true, multi: true }, // in every block, but a list can't be unindexed
+      },
+    },
+  };
+
+  test("warns about an index whose average value sits in most blocks, and not about one that prunes", () => {
+    writeFileSync(path.join(tmpDir, "flags.ndjson"), flags.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const { manifest, warnings } = build(flagConfig, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    expect(manifest.blocks.length).toBeGreaterThanOrEqual(8);
+    expect(warnings.filter((w) => /index\(even\): this index barely prunes/.test(w))).toHaveLength(1);
+    expect(warnings.some((w) => /index\(bucket\)/.test(w))).toBe(false);
+    expect(warnings.some((w) => /index\(parity\)/.test(w))).toBe(false);
+    expect(warnings.find((w) => /index\(even\)/.test(w))).toMatch(/stays filterable as a rider/);
+  });
+
+  test("an unindexed field is in the generated schema, queryable, with nothing that prunes", () => {
+    writeFileSync(path.join(tmpDir, "flags.ndjson"), flags.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const unindexed: BlockDbConfig = {
+      ...flagConfig,
+      schema: { ...flagConfig.schema, fields: { ...flagConfig.schema.fields, even: { kind: "boolean" } } },
+    };
+    const { clientOutDir, warnings } = build(unindexed, { baseDir: tmpDir, generatorVersion: "0.1.0", formatVersion: 0 });
+    const schemaTs = readFileSync(path.join(clientOutDir, "schema.ts"), "utf8");
+    expect(schemaTs).toContain('even: { kind: "boolean", operators: ["equals", "not"], pruning: [] }');
+    expect(warnings.some((w) => /index\(even\)/.test(w))).toBe(false);
+
+    // An empty `pruning` list means nothing on the field prunes: a filter on it rides, never stands alone.
+    assertConsumerCompiles(
+      clientOutDir,
+      `
+import { connect } from "./client.js";
+const db = connect();
+
+async function check() {
+  await db.flags.findMany({ where: { id: { lt: 50 }, even: { equals: true } } });
+  // @ts-expect-error — a rider alone
+  await db.flags.findMany({ where: { even: { equals: true } } });
+}
+void check;
+`,
+    );
   });
 });
 
@@ -588,20 +650,29 @@ async function valid() {
   await db.movies.findMany({ where: { year: { in: [1999, 2003] } } });
   await db.movies.findMany();
   db.movies.getSchema();
+
+  // title and rating are unindexed, so every filter on them is a rider (ADR-0013): valid alongside a
+  // pruning constraint, with every operator their type allows.
+  await db.movies.findMany({ where: { year: { gte: 2000 }, title: { contains: "at", not: "Snatch" }, rating: { gte: 8 } } });
+  await db.movies.findMany({ where: { year: { gte: 2000 } }, orderBy: { rating: "desc" } });
 }
 
 async function invalid() {
-  // title is NOT indexed (only year is, in T2) — unknown field in where.
+  // a rider alone — title is unindexed, so this would read every block.
   // @ts-expect-error
   await db.movies.findMany({ where: { title: { equals: "Gladiator" } } });
+
+  // two riders are still no pruning constraint.
+  // @ts-expect-error
+  await db.movies.findMany({ where: { title: { equals: "Gladiator" }, rating: { gt: 8 } } });
 
   // wrong value type: year is a number.
   // @ts-expect-error
   await db.movies.findMany({ where: { year: { gt: "2000" } } });
 
-  // orderBy over a non-indexed field.
+  // an unindexed string field still withholds ranges (ADR-0003 §7).
   // @ts-expect-error
-  await db.movies.findMany({ orderBy: { title: "asc" } });
+  await db.movies.findMany({ where: { year: { gte: 2000 }, title: { gte: "M" } } });
 }
 
 void valid;
@@ -680,14 +751,21 @@ async function invalid() {
   // @ts-expect-error
   await db.movies.findMany({ where: { title: { equals: 5 } } });
 
-  // rating is NOT indexed in this config — unknown field in where.
+  // rating is unindexed in this config: a rider, so not allowed alone.
   // @ts-expect-error
   await db.movies.findMany({ where: { rating: { equals: 8.5 } } });
 
-  // contains was never opted in for title — disabled operator.
+  // contains was never opted in for title, so it's a rider there too — not allowed alone...
   // @ts-expect-error
   await db.movies.findMany({ where: { title: { contains: "lad" } } });
 }
+
+async function riders() {
+  // ...but fine next to a constraint that prunes.
+  await db.movies.findMany({ where: { title: { startsWith: "G", contains: "lad" } } });
+  await db.movies.findMany({ where: { title: { equals: "Gladiator" }, rating: { gte: 8.5 } } });
+}
+void riders;
 
 void valid;
 void invalid;
@@ -750,6 +828,9 @@ async function valid() {
   const all = await db.movies.count();
   const constrained = await db.movies.count({ year: { gte: 2000 } });
   const secondary = await db.movies.count({ title: { equals: "Gladiator" } });
+  // count downloads nothing, so a rider-only where is fine: it just widens the bound (ADR-0013).
+  const riderOnly = await db.movies.count({ rating: { equals: 9.0 } });
+  void riderOnly;
   const explicitFalse = await db.movies.count({ year: { gte: 2000 } }, { exact: false });
 
   // The return shape: { count: number; exact: boolean }.
@@ -767,9 +848,9 @@ async function invalid() {
   // @ts-expect-error
   await db.movies.count({ exact: true });
 
-  // rating is NOT indexed in this config — unknown field in where.
+  // not a field of this collection at all.
   // @ts-expect-error
-  await db.movies.count({ rating: { equals: 9.0 } });
+  await db.movies.count({ director: { equals: "Nolan" } });
 }
 
 void valid;
@@ -960,14 +1041,14 @@ async function valid() {
   await db.movies.findMany({ where: { genres: { some: "Sci-Fi" } } });
   await db.movies.findMany({ where: { genres: { some: { startsWith: "Sci" } } } });
 
-  // Presence ops on the absentable field.
-  await db.movies.findMany({ where: { tagline: { isNull: true } } });
-  await db.movies.findMany({ where: { tagline: { isAbsent: true } } });
-  await db.movies.findMany({ where: { tagline: { exists: false } } });
+  // Presence ops on the absentable field. They're riders, so each rides on a sort-field range.
+  await db.movies.findMany({ where: { year: { gte: 1900 }, tagline: { isNull: true } } });
+  await db.movies.findMany({ where: { year: { gte: 1900 }, tagline: { isAbsent: true } } });
+  await db.movies.findMany({ where: { year: { gte: 1900 }, tagline: { exists: false } } });
 
   // A nullable-only field gets isNull and exists, but not isAbsent.
-  await db.movies.findMany({ where: { studio: { isNull: true } } });
-  await db.movies.findMany({ where: { studio: { exists: true } } });
+  await db.movies.findMany({ where: { year: { gte: 1900 }, studio: { isNull: true } } });
+  await db.movies.findMany({ where: { year: { gte: 1900 }, studio: { exists: true } } });
 
   // \`not\` alongside a real pruning constraint on the SAME field compiles and runs.
   await db.movies.findMany({ where: { title: { not: "Gladiator", startsWith: "G" } } });
@@ -1014,6 +1095,10 @@ async function invalid() {
   // \`not\` as the SOLE constraint — RiderGuard rejects it (no pruning companion).
   // @ts-expect-error
   await db.movies.findMany({ where: { title: { not: "Gladiator" } } });
+
+  // the missing-value operators are riders too, so alone they're rejected (ADR-0013).
+  // @ts-expect-error
+  await db.movies.findMany({ where: { tagline: { isNull: true } } });
 }
 
 void valid;
@@ -1837,7 +1922,7 @@ describe("seam #1 — derived fields (ADR-0009)", () => {
     // `absent: true` (unmappable values leave the key out) adds isAbsent/exists; never null, so no isNull.
     expect(manifest.schema.fields.power_num!.operators).toEqual(["equals", "in", "gt", "gte", "lt", "lte", "not", "isAbsent", "exists"]);
     // The source keeps its own semantics — `equals: "*"` still resolves, ranges still (rightly) don't.
-    expect(manifest.schema.fields.power!.operators).toEqual(["equals", "in", "startsWith", "not"]);
+    expect(manifest.schema.fields.power!.operators).toEqual(["equals", "in", "startsWith", "endsWith", "contains", "not"]);
     expect(manifest.zonemap.power_num).toHaveProperty("pairs");
   });
 
@@ -1877,8 +1962,9 @@ async function valid() {
   await db.movies.findMany({ where: { power_num: { gt: 1, lte: 12 } } });
   // the source column keeps the exact-match query the derived one cannot answer
   await db.movies.findMany({ where: { power: { equals: "*" } } });
-  // absent: true unlocks the presence operators, which is how you find the unparseable ones
-  await db.movies.findMany({ where: { power_num: { isAbsent: true } } });
+  // absent: true unlocks the presence operators, which is how you find the unparseable ones —
+  // riders, so they ride on a constraint that prunes
+  await db.movies.findMany({ where: { power: { in: ["*", "1+*"] }, power_num: { isAbsent: true } } });
 }
 
 async function invalid() {

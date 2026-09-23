@@ -13,7 +13,10 @@ export interface FieldSchemaEntry {
   kind: string;
   isDate: boolean;
   indexed: boolean;
+  /** Everything a `where` may write on this field (ADR-0013). */
   operators: readonly string[];
+  /** The subset of `operators` that narrows which blocks a query reads; the rest are riders. */
+  pruning: readonly string[];
   /** The key may be missing from a record (absent ≠ null). */
   absent?: true;
   /** The value may be `null` (null ≠ absent). */
@@ -144,6 +147,17 @@ export async function fetchManifest(
       message:
         `blockdb: the dataset at "${url}" was built with blockdb major ${String(parsed.formatVersion)} ` +
         `but this runtime is major ${FORMAT_VERSION} — align versions and re-run \`blockdb build\`.`,
+    });
+  }
+  // ADR-0013 added each field's `pruning` list inside major 0. The rider rule can't be enforced
+  // without it, so a tree built before it is refused like any format mismatch rather than guessed at.
+  if (Object.values(parsed.schema?.fields ?? {}).some((field) => !Array.isArray(field.pruning))) {
+    throw new BlockDbError({
+      code: "FORMAT_VERSION",
+      url,
+      message:
+        `blockdb: the dataset at "${url}" was built by a blockdb older than this runtime (before 0.3.0, which ` +
+        `added which operators prune) — re-run \`blockdb build\` with the current version and redeploy.`,
     });
   }
   return parsed;

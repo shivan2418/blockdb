@@ -27,3 +27,16 @@ The single field the dataset is globally sorted by. Its zonemap is non-overlappi
 
 **Manifest**:
 The root file every client downloads in full up-front: schema, block identity (ordinal → content-hash), sort-field split-points, and index chunk directories. Budgeted (~1 MB gzipped); anything that grows with the data spills to lazily-fetched sidecars.
+
+**Pruning constraint**:
+A filter that narrows which blocks a query reads: one on the sort field, or one backed by an index structure. Every `where` needs at least one, so no query reads the whole dataset.
+
+**Rider**:
+A filter that narrows nothing and only tests records already fetched: `not`, the missing-value operators, and any filter on an unindexed field. Valid only alongside a pruning constraint.
+_Avoid_: post-filter, residual filter, filter-only.
+
+**Indexed field**:
+A field with index structures behind some of its filters, so those filters prune. Being indexed is a cost-for-speed choice, not what makes a field queryable.
+
+**Unindexed field**:
+A queryable field with no index structure: every filter on it is a rider.
