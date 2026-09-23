@@ -38,6 +38,7 @@ interface RawFindManyArgs {
   limit?: number;
   offset?: number;
   signal?: AbortSignal;
+  scan?: "block-order";
 }
 
 /** Only equals/in/startsWith prune via the inverted index (ADR-0003 §7); other keys (e.g. `not`) don't. */
@@ -453,6 +454,29 @@ function fetchBlockAt(manifest: Manifest, ctx: FetchContext, index: number): Pro
 const BLOCK_WALK_BATCH = 4;
 
 /**
+ * A `scan: "block-order"` query skips the rider rule, which is only safe while the walk can stop at
+ * the first full page: a `limit`, and no ordering the blocks don't already have.
+ */
+function assertBlockOrderScan(manifest: Manifest, args: RawFindManyArgs): void {
+  const sortField = manifest.dataset.sortField;
+  if (args.scan !== "block-order") {
+    throw new BlockDbError({
+      code: "CONFIG",
+      message: `blockdb: unknown scan mode ${JSON.stringify(args.scan)} — the only one is "block-order".`,
+    });
+  }
+  if (blockWalkDirection(manifest, args) !== undefined) return;
+  throw new BlockDbError({
+    code: "NEEDS_PRUNING",
+    message:
+      `blockdb: scan: "block-order" walks the data files in sort order and stops once the page is full, so it ` +
+      `needs a \`limit\` and no \`orderBy\` other than the sort field "${sortField}"` +
+      (args.limit === undefined ? `. This query has no limit.` : `. This query's orderBy can't be answered in block order.`) +
+      ` See "Scanning in block order" in docs/query-guide.md.`,
+  });
+}
+
+/**
  * Which direction to walk candidate blocks when a bounded query's requested order already matches
  * their physical order — `undefined` when it doesn't, meaning every candidate has to be fetched
  * before the ordering (and therefore the page) is known.
@@ -673,7 +697,8 @@ export function createClient<S extends SchemaMeta, Records>(
         if (args?.where !== undefined) args = { ...args, where: compactWhere(args.where) };
         return withManifest(args?.signal, (manifest, ctx) => {
           // After the manifest (which says what prunes on this dataset), before any index or block fetch.
-          assertWhereHasPruning(args?.where, manifest.schema);
+          if (args?.scan !== undefined) assertBlockOrderScan(manifest, args);
+          else assertWhereHasPruning(args?.where, manifest.schema);
           return executeFindMany(manifest, ctx, args, maxResults);
         });
       },

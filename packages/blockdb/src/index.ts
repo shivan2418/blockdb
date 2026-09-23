@@ -12,6 +12,7 @@ export {
   type CountResult,
   type FieldKind,
   type FieldMeta,
+  type BlockOrderScanArgs,
   type FindManyArgs,
   type QueryOptions,
   type FindManyResult,

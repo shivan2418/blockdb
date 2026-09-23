@@ -567,6 +567,10 @@ async function check() {
   await db.flags.findMany({ where: { id: { lt: 50 }, even: { equals: true } } });
   // @ts-expect-error — a rider alone
   await db.flags.findMany({ where: { even: { equals: true } } });
+  // A rider alone is fine as an explicit block-order scan, which needs a limit.
+  await db.flags.findMany({ where: { even: { equals: true } }, scan: "block-order", limit: 20 });
+  // @ts-expect-error — a scan without a limit can't stop early
+  await db.flags.findMany({ where: { even: { equals: true } }, scan: "block-order" });
 }
 void check;
 `,

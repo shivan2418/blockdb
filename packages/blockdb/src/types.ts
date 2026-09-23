@@ -372,7 +372,8 @@ export function assertWhereHasPruning(
       (prunable.length > 0 ? ` or on an indexed field (${prunable.join(", ")})` : "") +
       `.` +
       valueRiderNotes(compactWhere(where) ?? {}).join("") +
-      ` Check with wherePrunes() before querying. See "Riders" in docs/query-guide.md.`,
+      ` Check with wherePrunes() before querying. For a browse-style search that is rider-only on purpose, pass ` +
+      `scan: "block-order" with a limit, which reads files in sort order until the page is full. See "Riders" in docs/query-guide.md.`,
   });
 }
 
@@ -413,6 +414,24 @@ export interface FindManyArgs<C extends CollectionMeta, W extends WhereOf<C>> ex
   where?: W & ValidateWhere<W, C> & RiderGuard<W, C>;
   orderBy?: OrderByOf<C>;
   limit?: number;
+  offset?: number;
+  scan?: never;
+}
+
+/**
+ * A `findMany` that may filter on riders alone, by walking the data files in sort order until the
+ * page is full. Needs a `limit`, and no `orderBy` other than the sort field (checked at runtime, which
+ * is where the sort field is known), because that is what lets the walk stop early.
+ *
+ * Opt-in because the cost depends on the data: a rider most records match fills the page from the
+ * first file or two, and one few records match can read most of the dataset before it does. Use it
+ * for a browse-style search where either outcome is acceptable, not as a way around NEEDS_PRUNING.
+ */
+export interface BlockOrderScanArgs<C extends CollectionMeta, W extends WhereOf<C>> extends QueryOptions {
+  where?: W & ValidateWhere<W, C>;
+  scan: "block-order";
+  orderBy?: OrderByOf<C>;
+  limit: number;
   offset?: number;
 }
 
@@ -455,6 +474,7 @@ export interface CountOptions extends QueryOptions {
 
 interface CollectionBase<C extends CollectionMeta, Rec> {
   findMany<W extends WhereOf<C>>(args?: FindManyArgs<C, W>): Promise<FindManyResult<Rec>>;
+  findMany<W extends WhereOf<C>>(args: BlockOrderScanArgs<C, W>): Promise<FindManyResult<Rec>>;
   // No RiderGuard here, deliberately: count reads only the manifest, so a
   // rider-only where just widens the upper bound (ADR-0008 §3) — count never
   // downloads the dataset, so the rider rule has nothing to guard (ADR-0013).

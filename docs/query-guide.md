@@ -144,6 +144,18 @@ const { records } = wherePrunes(where, db.books.getSchema())
 
 A filter or operator set to `undefined` is left out, the same as if it weren't written: `{ set: chosen ? { equals: chosen } : undefined }` filters on `set` only when something is chosen. `findMany`, `count` and `wherePrunes` all drop these first, so a `where` whose filters are all `undefined` is the empty `where`.
 
+**Scanning in block order.** Some searches really are rider-only: "colorless cards", a one-letter name search, or a `not` filter alone. For those, opt into a scan. It walks the data files in sort order and stops as soon as the page is full:
+
+```ts
+const { records, hasMore } = await db.books.findMany({
+  where: { inStock: { equals: true } }, // a rider alone
+  scan: "block-order",
+  limit: 20,
+});
+```
+
+A scan needs a `limit`, and it can't have an `orderBy` on any field but the sort field. Without those it couldn't stop early, so the compiler rejects a missing `limit`, and the runtime rejects the ordering with `NEEDS_PRUNING`. The cost depends on the data. A rider most records match fills the page from the first file or two. One that few records match can read most of the dataset before the page fills, or before it runs out. So use a scan where either outcome is acceptable, like a browse view, and keep a pruning filter wherever you have one. There's no need for a fake range such as `{ title: { gte: "" } }` to get past the rider check; that costs the same and hides the intent.
+
 **When to index a field.** Index it when a filter on it should narrow the read by itself. Leave it unindexed when it's only ever combined with a more selective filter, or when its values are spread across every file anyway: a boolean, or a house number in an address list sorted by street. `blockdb build` warns about an index whose average value appears in most files, because that index costs build output and saves nothing.
 
 ## Which operators a field gets
