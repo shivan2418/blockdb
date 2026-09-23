@@ -1,4 +1,4 @@
-# static-shard
+# blockdb
 
 Glossary for the project: a build tool that splits a large static dataset into many small whole files, indexes them, and generates a typed client that fetches only the files a query needs — no backend, no WASM, no HTTP Range.
 
@@ -6,7 +6,11 @@ Glossary for the project: a build tool that splits a large static dataset into m
 
 **Block**:
 One of the small whole files `build` emits: a size-bounded slice of the globally-sorted dataset, holding a non-overlapping value range of the sort field and carrying a per-field zonemap. The unit a query prunes down to.
-_Avoid_: Shard (oversells hash/distribution routing that doesn't happen), Chunk (reserved for index pieces; undersells the pruning semantics).
+_Avoid_: Shard (oversells hash/distribution routing that doesn't happen; the project's old name, retired in ADR-0011), Chunk (reserved for index pieces; undersells the pruning semantics).
+
+**Missing tail**:
+The run of records whose sort-field value is null or absent, clustered after every real value at the high end of the sorted dataset. Its own term so that "block" only ever means a data file.
+_Avoid_: missing block.
 
 **Zonemap**:
 Per-block `[min, max]` for an indexed field. Non-overlapping for the sort field (exact pruning), overlapping for secondary fields (weak pruning). Always-downloaded in the manifest (may spill to sidecars). Heritage: Netezza/Redshift zone maps over blocks.

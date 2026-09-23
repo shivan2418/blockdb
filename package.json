@@ -1,5 +1,5 @@
 {
-  "name": "static-shard-monorepo",
+  "name": "blockdb-monorepo",
   "private": true,
   "type": "module",
   "engines": {

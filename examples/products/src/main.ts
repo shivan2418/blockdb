@@ -1,5 +1,5 @@
-import { connect } from "./shard-db/client.js";
-import type { ProductsCategory } from "./shard-db/schema.js";
+import { connect } from "./blockdb/client.js";
+import type { ProductsCategory } from "./blockdb/schema.js";
 
 const db = connect();
 

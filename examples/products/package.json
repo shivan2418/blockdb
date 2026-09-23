@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "static-shard example: a product lookup (CSV input, user PK + get(id), boolean equals, absent/isNull).",
+  "description": "blockdb example: a product lookup (CSV input, user PK + get(id), boolean equals, absent/isNull).",
   "scripts": {
     "generate-data": "node scripts/generate-data.mjs",
     "build-data": "node scripts/build-data.mjs",
@@ -14,10 +14,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "static-shard": "workspace:*"
+    "blockdb": "workspace:*"
   },
   "devDependencies": {
-    "static-shard-cli": "workspace:*",
+    "blockdb-cli": "workspace:*",
     "@types/node": "latest",
     "typescript": "latest",
     "vite": "latest",

@@ -1,22 +1,22 @@
-# static-shard
+# blockdb
 
-Query large static datasets from any static host — no database, no backend, no WASM, no HTTP Range requests.
+Query large datasets from any static host: no backend, no WASM, no HTTP Range requests.
 
-`static-shard` splits a large dataset into many small files at build time, builds indexes over them, and generates a **typed client** that fetches only the files a query needs. Because it fetches whole small files (not byte ranges of one big file), it works on any dumb static host and every shard is a plain, compressible, cacheable CDN object.
+`blockdb` splits a large dataset into many small files at build time, builds indexes over them, and generates a **typed client** that fetches only the files a query needs. Because it fetches whole small files (not byte ranges of one big file), it works on any dumb static host and every block is a plain, compressible, cacheable CDN object.
 
-> **Status: v1.0, built against the locked design spec.** The previous prototype (attempt #2) is preserved on the [`attempt-2-reference`](https://github.com/shivan2418/static-shard/tree/attempt-2-reference) branch for reference only — it is **not** the basis for this build.
+> **Status: v1.0, built against the locked design spec.** The previous prototype (attempt #2) is preserved on the [`attempt-2-reference`](https://github.com/shivan2418/blockdb/tree/attempt-2-reference) branch for reference only — it is **not** the basis for this build.
 
 ## Quickstart
 
 ```bash
-pnpm add static-shard && pnpm add -D static-shard-cli
-npx static-shard-cli init      # a guided wizard reads a sample of your data, recommends
-                                #   what to index, and writes static-shard.config.json
-npx static-shard build         # → public/shard-data/  (deploy this)  +  src/shard-db/  (commit this)
+pnpm add blockdb && pnpm add -D blockdb-cli
+npx blockdb-cli init      # a guided wizard reads a sample of your data, recommends
+                                #   what to index, and writes blockdb.config.json
+npx blockdb build         # → public/blockdb/  (deploy this)  +  src/blockdb/  (commit this)
 ```
 
 ```ts
-import { connect } from "./shard-db/client";
+import { connect } from "./blockdb/client";
 
 const db = connect();
 const { records } = await db.movies.findMany({
@@ -26,21 +26,21 @@ const { records } = await db.movies.findMany({
 });
 ```
 
-Two complete, working example apps — a movie catalog and a product lookup, each building → deploying → querying in a real browser — live in [`examples/`](https://github.com/shivan2418/static-shard/tree/master/examples).
+Two complete, working example apps — a movie catalog and a product lookup, each building → deploying → querying in a real browser — live in [`examples/`](https://github.com/shivan2418/blockdb/tree/master/examples).
 
-## Why static-shard?
+## Why blockdb?
 
-The problem — *query a big dataset in the browser, with no database and no backend, served from plain static hosting* — is well-trodden. Almost every existing tool solves it the **opposite way** from static-shard: keep **one big file** and read byte-slices of it with **HTTP Range requests** inside a **WebAssembly engine**.
+The problem — *query a big dataset in the browser, with no database server and no backend, served from plain static hosting* — is well-trodden. Almost every existing tool solves it the **opposite way** from blockdb: keep **one big file** and read byte-slices of it with **HTTP Range requests** inside a **WebAssembly engine**.
 
-static-shard splits your data into **many small whole files** at build time, indexes them, and generates a **typed client** that fetches only the files a query needs. That trade buys three things the one-big-file approach can't easily get:
+blockdb splits your data into **many small whole files** at build time, indexes them, and generates a **typed client** that fetches only the files a query needs. That trade buys three things the one-big-file approach can't easily get:
 
 - **Runs on any static host.** It fetches whole files by URL — no HTTP Range support required. GitHub Pages, S3, an old nginx, a corporate proxy: if it can serve a file, it works.
-- **Compression actually works.** Range requests and on-the-fly gzip/brotli fight each other (byte offsets shift once compressed), so the one-file camp often has to serve data *uncompressed*. Whole-file shards compress end-to-end — a big deal for JSON, which shrinks 5–10×.
+- **Compression actually works.** Range requests and on-the-fly gzip/brotli fight each other (byte offsets shift once compressed), so the one-file camp often has to serve data *uncompressed*. Whole-file blocks compress end-to-end — a big deal for JSON, which shrinks 5–10×.
 - **A typed client, no engine.** The generated client is small JS with zero runtime dependencies and no multi-MB WASM to download and compile before the first query. Your fields and per-field operators are typed from the data.
 
 **The honest cost:** many small files means **more HTTP requests** than a single range-read file, and it's **read-only** (you rebuild and redeploy to update). If those are dealbreakers, pick one of the alternatives below.
 
-### Use static-shard when
+### Use blockdb when
 
 - You have a **large, mostly-static, structured dataset** (roughly tens of MB up to ~1 GB) that you want to **query by field** (equality, ranges, `in`, simple string matches).
 - The data is **read-only** from the browser's side — rebuild-to-update is fine.
@@ -50,21 +50,21 @@ static-shard splits your data into **many small whole files** at build time, ind
 
 ### Reach for something else when
 
-**If you have — or can run — a server and an API, that is almost always the right choice.** A real backend with a database handles anything that mutates, needs authentication or private/per-user data, must always be fresh, or runs heavy relational/analytical queries. static-shard exists for when you *can't* or *won't* run one; don't adopt it to dodge building an API you actually need.
+**If you have — or can run — a server and an API, that is almost always the right choice.** A real backend with a database handles anything that mutates, needs authentication or private/per-user data, must always be fresh, or runs heavy relational/analytical queries. blockdb exists for when you *can't* or *won't* run one; don't adopt it to dodge building an API you actually need.
 
 For the no-backend / static-hosting case specifically, here's the landscape and when each fits better:
 
 | Tool | How it works | Reach for it instead when |
 |------|--------------|---------------------------|
 | **A backend + DB + API** (Postgres/Mongo + REST/GraphQL) | A server runs queries against a database | The data mutates, needs auth or private data, must be always-fresh, or needs joins / aggregations / full SQL. |
-| **Just load the whole file** | `fetch()` the entire JSON and filter in memory | The dataset is small (a few MB or less) — below that, sharding is pure overhead. |
+| **Just load the whole file** | `fetch()` the entire JSON and filter in memory | The dataset is small (a few MB or less) — below that, partitioning is pure overhead. |
 | **sql.js-httpvfs** (phiresky) | SQLite → WASM, reads pages of one file via HTTP Range | You need full read-only **SQL** (joins, aggregates), your host supports Range, and WASM + a largely-uncompressed DB file is acceptable. |
 | **DuckDB-WASM + Parquet** | WASM SQL engine, range-reads Parquet row groups, prunes via column stats | You run heavy **analytical / aggregation** queries over columnar data and can afford a multi-MB WASM engine. |
 | **hyparquet** | Pure-JS (no WASM) Parquet reader, range-fetches column chunks | You want to read **existing Parquet** files in the browser without WASM. |
 | **PMTiles** | Single-file archive with an internal directory → any record in ≤2 range reads | Your data is **map tiles** or a key→blob archive served from one file. |
-| **Pagefind / lunr / FlexSearch** | Build-time index shipped (or sharded) to the browser | The query is **full-text search** over documents, not structured field filtering. |
+| **Pagefind / lunr / FlexSearch** | Build-time index shipped (or partitioned) to the browser | The query is **full-text search** over documents, not structured field filtering. |
 
-static-shard overlaps most with **sql.js-httpvfs** (same goal — a database on static hosting) and **Pagefind** (same architecture — a build-time-sharded index fetched on demand). It differs by targeting **structured + numeric-range queries** with **no WASM**, **no HTTP Range**, and a **typed generated client**.
+blockdb overlaps most with **sql.js-httpvfs** (same goal — a database on static hosting) and **Pagefind** (same architecture — a build-time-partitioned index fetched on demand). It differs by targeting **structured + numeric-range queries** with **no WASM**, **no HTTP Range**, and a **typed generated client**.
 
 ## License
 

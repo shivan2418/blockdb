@@ -1,24 +1,24 @@
-# static-shard
+# blockdb
 
-> Query large static datasets from any static host — no database, no backend, no WASM, no HTTP Range requests. static-shard splits a large dataset into many small whole files at build time, builds indexes over them, and generates a typed TypeScript client that fetches only the files a query needs. Because it fetches whole small files (not byte ranges of one big file), it works on any dumb static host and every shard is a plain, compressible, cacheable CDN object.
+> Query large datasets from any static host: no backend, no WASM, no HTTP Range requests. blockdb splits a large dataset into many small whole files at build time, builds indexes over them, and generates a typed TypeScript client that fetches only the files a query needs. Because it fetches whole small files (not byte ranges of one big file), it works on any dumb static host and every block is a plain, compressible, cacheable CDN object.
 
 Key facts an implementer needs up front:
 
-- Two packages, lockstep-versioned: **`static-shard`** (browser runtime, zero deps, ESM-only, production dependency) and **`static-shard-cli`** (Node build tool, devDependency, `bin` named `static-shard`).
-- Install with pnpm: `pnpm add static-shard && pnpm add -D static-shard-cli`.
+- Two packages, lockstep-versioned: **`blockdb`** (browser runtime, zero deps, ESM-only, production dependency) and **`blockdb-cli`** (Node build tool, devDependency, `bin` named `blockdb`).
+- Install with pnpm: `pnpm add blockdb && pnpm add -D blockdb-cli`.
 - The query API is the generated typed client only — a Prisma-style `where` object, not SQL and not a chained builder.
-- Read-only from the browser: you update data by re-running `static-shard build` and redeploying. No cursors, no OR/AND/NOT in v1.0 (implicit-AND only).
+- Read-only from the browser: you update data by re-running `blockdb build` and redeploying. No cursors, no OR/AND/NOT in v1.0 (implicit-AND only).
 
 ## Quickstart
 
 ```bash
-pnpm add static-shard && pnpm add -D static-shard-cli
-npx static-shard-cli init      # guided wizard: samples your data, recommends what to index, writes static-shard.config.json
-npx static-shard build         # → public/shard-data/ (deploy this) + src/shard-db/{schema,client}.ts (commit these)
+pnpm add blockdb && pnpm add -D blockdb-cli
+npx blockdb-cli init      # guided wizard: samples your data, recommends what to index, writes blockdb.config.json
+npx blockdb build         # → public/blockdb/ (deploy this) + src/blockdb/{schema,client}.ts (commit these)
 ```
 
 ```ts
-import { connect } from './shard-db/client'
+import { connect } from './blockdb/client'
 
 const db = connect() // no args works for the standard deploy; connect({ basePath }) to override
 
@@ -31,28 +31,28 @@ const { records, hasMore } = await db.movies.findMany({
 
 ## Query API (ADR-0001)
 
-- [Query API surface](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0001-query-api-surface.md): the single canonical object/where-clause API. Methods per collection: `findMany(args) → { records, hasMore }`, `count(args) → { count, exact }`, `get(id) → record | null` (PK-gated), `getSchema()`. Per-type operators (string `equals`/`not`/`in`/`contains`/`startsWith`/`endsWith`; number & date `equals`/`not`/`in`/`gt`/`gte`/`lt`/`lte`; boolean `equals`/`not`; multi-valued `some`/`every`/`hasEvery`/`isEmpty` — see ADR-0010). `orderBy` object (`asc`/`desc`, multi-key), offset/limit pagination, implicit-AND only.
-- [Count, cost & pagination](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0008-count-cost-and-pagination.md): why `count` returns an approximate upper bound with an `exact` flag, and the limit+1 `hasMore` over-fetch.
-- [List operators](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0010-list-operators.md): `hasEvery` (contains all), `every` (every element matches; `[]` passes), `isEmpty` beside `some` on multi-valued fields; keys on one field AND, so exact-set is `hasEvery` + `every`. Absent/null lists match none of them. All prune via the index plus a per-field `emptyShards` list.
+- [Query API surface](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0001-query-api-surface.md): the single canonical object/where-clause API. Methods per collection: `findMany(args) → { records, hasMore }`, `count(args) → { count, exact }`, `get(id) → record | null` (PK-gated), `getSchema()`. Per-type operators (string `equals`/`not`/`in`/`contains`/`startsWith`/`endsWith`; number & date `equals`/`not`/`in`/`gt`/`gte`/`lt`/`lte`; boolean `equals`/`not`; multi-valued `some`/`every`/`hasEvery`/`isEmpty` — see ADR-0010). `orderBy` object (`asc`/`desc`, multi-key), offset/limit pagination, implicit-AND only.
+- [Count, cost & pagination](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0008-count-cost-and-pagination.md): why `count` returns an approximate upper bound with an `exact` flag, and the limit+1 `hasMore` over-fetch.
+- [List operators](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0010-list-operators.md): `hasEvery` (contains all), `every` (every element matches; `[]` passes), `isEmpty` beside `some` on multi-valued fields; keys on one field AND, so exact-set is `hasEvery` + `every`. Absent/null lists match none of them. All prune via the index plus a per-field `emptyBlocks` list.
 
 ## Build & packaging (ADR-0005)
 
-- [Package & CLI public contract](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0005-package-and-cli-contract.md): the two-package split, lockstep versioning, the `init`/`build`/`inspect` commands, flag-equivalence (`init --yes`), the committed `static-shard.config.json` (flags > config > inferred defaults), the two outputs, and the version compatibility handshake.
-- [Codegen & typed client](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0004-codegen-and-typed-client.md): how the runtime and the generated per-dataset facade blend; what `createClient` / the generated `connect()` emit.
-- [Runtime failure contract](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0007-runtime-failure-contract.md): `ShardError` / `ShardErrorCode`, partial-failure semantics, and the fail-loud major-version mismatch at `connect()`.
+- [Package & CLI public contract](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0005-package-and-cli-contract.md): the two-package split, lockstep versioning, the `init`/`build`/`inspect` commands, flag-equivalence (`init --yes`), the committed `blockdb.config.json` (flags > config > inferred defaults), the two outputs, and the version compatibility handshake.
+- [Codegen & typed client](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0004-codegen-and-typed-client.md): how the runtime and the generated per-dataset facade blend; what `createClient` / the generated `connect()` emit.
+- [Runtime failure contract](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0007-runtime-failure-contract.md): `BlockDbError` / `BlockDbErrorCode`, partial-failure semantics, and the fail-loud major-version mismatch at `connect()`.
 
 ## Data format
 
-- [Sharding strategy](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0002-sharding-strategy.md): why many small whole files instead of one range-read file; content-hashed NDJSON shards.
-- [Index & manifest design](https://github.com/shivan2418/static-shard/blob/master/docs/adr/0003-index-and-manifest-design.md): `manifest.json` as the stable entry point, zonemap sidecars, lazy inverted-index chunks, `formatVersion`.
-- [Config JSON schema](https://github.com/shivan2418/static-shard/blob/master/packages/static-shard-cli/config.schema.json): the validated shape of `static-shard.config.json`.
+- [Partitioning strategy](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0002-partitioning-strategy.md): why many small whole files instead of one range-read file; content-hashed NDJSON blocks.
+- [Index & manifest design](https://github.com/shivan2418/blockdb/blob/master/docs/adr/0003-index-and-manifest-design.md): `manifest.json` as the stable entry point, zonemap sidecars, lazy inverted-index chunks, `formatVersion`.
+- [Config JSON schema](https://github.com/shivan2418/blockdb/blob/master/packages/blockdb-cli/config.schema.json): the validated shape of `blockdb.config.json`.
 
 ## Examples
 
-- [Movie catalog](https://github.com/shivan2418/static-shard/tree/master/examples/movies): a complete build → deploy → query-in-browser app; see `src/shard-db/` for the generated client and `src/main.ts` for real queries.
-- [Product lookup](https://github.com/shivan2418/static-shard/tree/master/examples/products): a second dataset shape, same end-to-end flow.
+- [Movie catalog](https://github.com/shivan2418/blockdb/tree/master/examples/movies): a complete build → deploy → query-in-browser app; see `src/blockdb/` for the generated client and `src/main.ts` for real queries.
+- [Product lookup](https://github.com/shivan2418/blockdb/tree/master/examples/products): a second dataset shape, same end-to-end flow.
 
 ## Optional
 
-- [Deploy guide](https://github.com/shivan2418/static-shard/blob/master/docs/deploy-guide.md): caching headers for `manifest.json` (revalidate) vs the immutable content-hashed tree (cache-forever), and transport concerns per static host.
-- [README](https://github.com/shivan2418/static-shard/blob/master/README.md): positioning, "use it when / reach for something else when", and the alternatives comparison (sql.js-httpvfs, DuckDB-WASM, hyparquet, PMTiles, Pagefind).
+- [Deploy guide](https://github.com/shivan2418/blockdb/blob/master/docs/deploy-guide.md): caching headers for `manifest.json` (revalidate) vs the immutable content-hashed tree (cache-forever), and transport concerns per static host.
+- [README](https://github.com/shivan2418/blockdb/blob/master/README.md): positioning, "use it when / reach for something else when", and the alternatives comparison (sql.js-httpvfs, DuckDB-WASM, hyparquet, PMTiles, Pagefind).

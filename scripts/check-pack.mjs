@@ -49,13 +49,13 @@ function assertNoRuntimeDeps(pkgDir, pkgName) {
   }
 }
 
-const runtimeDir = path.join(packagesDir, "static-shard");
-const cliDir = path.join(packagesDir, "static-shard-cli");
+const runtimeDir = path.join(packagesDir, "blockdb");
+const cliDir = path.join(packagesDir, "blockdb-cli");
 
-assertOnlyAllowed("static-shard", packFiles("static-shard", runtimeDir));
-assertNoRuntimeDeps(runtimeDir, "static-shard");
+assertOnlyAllowed("blockdb", packFiles("blockdb", runtimeDir));
+assertNoRuntimeDeps(runtimeDir, "blockdb");
 
-assertOnlyAllowed("static-shard-cli", packFiles("static-shard-cli", cliDir), ["config.schema.json"]);
+assertOnlyAllowed("blockdb-cli", packFiles("blockdb-cli", cliDir), ["config.schema.json"]);
 
 if (process.exitCode) {
   process.exit(process.exitCode);

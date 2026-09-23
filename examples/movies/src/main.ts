@@ -1,4 +1,4 @@
-import { connect } from "./shard-db/client.js";
+import { connect } from "./blockdb/client.js";
 
 const db = connect();
 
