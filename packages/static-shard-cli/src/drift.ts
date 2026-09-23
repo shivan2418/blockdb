@@ -23,10 +23,18 @@ export function assertNoSchemaDrift(records: Record<string, unknown>[], fields: 
         if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
           throw new Error(
             `static-shard: schema drift — field "${name}" is declared "multi" (string[]) in static-shard.config.json ` +
-              `but record ${i} has ${JSON.stringify(value)}. Run "static-shard-cli init --reinfer" to refresh the baked schema.`,
+              `but record ${i} has ${JSON.stringify(value)}. Run "static-shard init --reinfer" to refresh the baked schema.`,
           );
         }
         continue;
+      }
+
+      if (Array.isArray(value)) {
+        throw new Error(
+          `static-shard: schema drift — field "${name}" is declared a single ${field.kind} in static-shard.config.json ` +
+            `but record ${i} has an array (${JSON.stringify(value)}). A multi-valued field is either ` +
+            `"multi": true (which needs "indexed": true) or, if you don't query it, "kind": "json".`,
+        );
       }
 
       const expected = expectedTypeof(field.kind);
@@ -34,7 +42,7 @@ export function assertNoSchemaDrift(records: Record<string, unknown>[], fields: 
         throw new Error(
           `static-shard: schema drift — field "${name}" is declared kind "${field.kind}" in static-shard.config.json ` +
             `but record ${i} has a ${typeof value} value (${JSON.stringify(value)}). ` +
-            `Run "static-shard-cli init --reinfer" to refresh the baked schema.`,
+            `Run "static-shard init --reinfer" to refresh the baked schema.`,
         );
       }
     }

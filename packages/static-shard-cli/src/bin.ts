@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { build } from "./build.js";
+import { formatCliError } from "./cli-error.js";
 import { loadConfigFile } from "./config.js";
 import { DEFAULT_SAMPLE_SIZE, init } from "./init.js";
 import { inspect } from "./inspect.js";
@@ -286,6 +287,6 @@ async function main(argv: string[]): Promise<void> {
 }
 
 main(process.argv.slice(2)).catch((err: unknown) => {
-  console.error(err instanceof Error ? `static-shard: ${err.message}` : String(err));
+  console.error(formatCliError(err));
   process.exitCode = 1;
 });

@@ -49,4 +49,18 @@ describe("assertNoSchemaDrift", () => {
     const records = [{ year: 1999 }, { year: 2000 }, { year: "2001" }];
     expect(() => assertNoSchemaDrift(records, fields)).toThrow(/2/);
   });
+
+  test("an array on a single-valued field says how to declare it, instead of just 'object'", () => {
+    // The common way in: un-indexing a multi-valued field drops `multi` with it, since `multi`
+    // requires `indexed`. "has a object value" alone doesn't tell you the way out.
+    const records = [{ title: ["G"] }];
+    expect(() => assertNoSchemaDrift(records, fields)).toThrow(/array/);
+    expect(() => assertNoSchemaDrift(records, fields)).toThrow(/"multi": true.*"indexed": true/);
+    expect(() => assertNoSchemaDrift(records, fields)).toThrow(/"kind": "json"/);
+  });
+
+  test("names the CLI's real binary when suggesting a fix", () => {
+    expect(() => assertNoSchemaDrift([{ year: "1999" }], fields)).toThrow(/"static-shard init --reinfer"/);
+    expect(() => assertNoSchemaDrift([{ genres: "Action" }], fields)).toThrow(/"static-shard init --reinfer"/);
+  });
 });
