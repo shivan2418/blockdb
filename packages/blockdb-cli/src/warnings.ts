@@ -17,9 +17,9 @@ export function lowCardinalitySortFieldWarning(recordCount: number, sortFieldCar
  * dataset that the index isn't buying pruning — it's paying for itself twice (build output plus a
  * chunk fetch) to arrive at "read most of the files anyway".
  */
-const UNSELECTIVE_POSTINGS_RATIO = 0.35;
+export const UNSELECTIVE_POSTINGS_RATIO = 0.35;
 /** Below this block count the ratio is degenerate (a 1-block build is trivially "100% of blocks"), so stay quiet. */
-const MIN_BLOCKS_FOR_SELECTIVITY = 8;
+export const MIN_BLOCKS_FOR_SELECTIVITY = 8;
 
 /**
  * ADR-0003 §7: `endsWith`/`contains` are per-field opt-ins whose whole justification is pruning. A
@@ -62,6 +62,20 @@ export function unselectiveIndexWarning(field: string, meanPostings: number | un
     `${Math.round(meanPostings)} of ${blockCount} data files (${Math.round(ratio * 100)}%). Consider removing ` +
     `"indexed": true: "${field}" stays filterable as a rider next to a filter that prunes, and the build ` +
     `drops this index's files.`
+  );
+}
+
+/**
+ * Why `init` left a field unindexed that it would once have recommended (#31): sorted the way the
+ * config sorts, the field's values sit in most data files, so its index would be the kind the build
+ * warns "barely prunes". Says what indexing it would still buy — a field filtered on by itself needs a
+ * pruning constraint, and an index is one even when it prunes badly.
+ */
+export function skippedIndexNote(field: string, sortField: string, blockShare: number): string {
+  return (
+    `blockdb: init left "${field}" unindexed — sorted by "${sortField}", its average value would sit in about ` +
+    `${Math.round(blockShare * 100)}% of the data files, so an index wouldn't narrow the read. It stays filterable ` +
+    `as a rider next to a filter that prunes. Add "indexed": true if you need to filter on "${field}" by itself.`
   );
 }
 

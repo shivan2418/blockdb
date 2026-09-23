@@ -633,3 +633,25 @@ describe("stage order — what you filter on is asked BEFORE the sort field", ()
     expect(state.sortField).toBe("rank");
   });
 });
+
+describe("fast filters flag indexes that wouldn't prune (#31)", () => {
+  const records = Array.from({ length: 2000 }, (_, id) => ({ id, batch: `b${Math.floor(id / 100)}`, color: `c${id % 10}` }));
+
+  test("a scattered field is marked on its row and warned about once ticked", () => {
+    const data = buildWizardData(records);
+    const base = applyKey(data, createInitialState(data), { type: "right" }); // the fast-filters stage
+    // Small blocks, so the ratio has enough files to mean something.
+    const state: WizardState = { ...base, sortField: "id", blockBytes: 4096, indexedFields: new Set(["batch", "color"]) };
+    const estimate = estimateForState(data, state);
+
+    expect(estimate.costs.blockCount).toBeGreaterThanOrEqual(8);
+    expect(estimate.blockShare.color).toBeGreaterThan(0.9);
+    expect(estimate.blockShare.batch).toBeLessThan(0.2);
+    expect(estimate.warnings.filter((w) => /index\(color\): this index barely prunes/.test(w))).toHaveLength(1);
+    expect(estimate.warnings.some((w) => /index\(batch\)/.test(w))).toBe(false);
+
+    const rows = renderFrame(data, state, estimate).split("\n");
+    expect(rows.find((l) => l.includes(" color "))).toMatch(/barely prunes: in ~\d+% of files/);
+    expect(rows.find((l) => l.includes(" batch "))).not.toMatch(/barely prunes/);
+  });
+});

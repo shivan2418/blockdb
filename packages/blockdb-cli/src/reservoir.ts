@@ -26,14 +26,19 @@ export class Reservoir<T> {
   constructor(private readonly max: number) {}
 
   add(item: T): void {
+    this.addWith(() => item);
+  }
+
+  /** `add`, building the item only if the sample keeps it — for items that cost something to make. */
+  addWith(make: () => T): void {
     this.seen++;
     if (this.items.length < this.max) {
-      this.items.push(item);
+      this.items.push(make());
       return;
     }
     // The n-th item replaces a random slot with probability max / n.
     const slot = Math.floor(this.random() * this.seen);
-    if (slot < this.max) this.items[slot] = item;
+    if (slot < this.max) this.items[slot] = make();
   }
 
   get sample(): T[] {

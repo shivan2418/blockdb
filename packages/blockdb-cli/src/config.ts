@@ -5,7 +5,7 @@ import type { Compression, InputFormat, ResolvedConfig, BlockDbConfig } from "./
 
 const DEFAULT_OUTPUT = "public/blockdb";
 const DEFAULT_CLIENT_OUT = "src/blockdb";
-const DEFAULT_BLOCK_BYTES = 2_097_152; // 2 MiB
+export const DEFAULT_BLOCK_BYTES = 2_097_152; // 2 MiB
 /** ~45 KB gzipped anchor (ADR-0003 §5) — exported so the wizard's live estimates (T12) use the same default `build` would. */
 export const DEFAULT_INDEX_CHUNK_BYTES = 45_000;
 const INPUT_FORMATS = ["ndjson", "json", "csv", "tsv"] as const;

@@ -31,3 +31,4 @@ The rule against full scans also had a hole. Only `not` counted as a filter that
 - Breaking in 0.3.0: a `where` made only of missing-value operators, or only of `contains` shorter than three characters, now needs a pruning companion. Old deploys need a rebuild.
 - Indexing becomes purely a cost-for-speed choice. The wizard's first step now asks "Which filters need to be fast?"
 - `contains` is free as a rider on any string field and costs a trigram index only when it should prune.
+- `init` no longer recommends an index the build would warn about (#31). A field left unindexed that way stays filterable as a rider; index it anyway when an app filters on it alone, since an index is a pruning constraint even when it prunes badly.

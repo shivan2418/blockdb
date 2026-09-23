@@ -40,6 +40,16 @@ The wizard measures this rather than guessing. It asks what you filter on **firs
 
 `init --yes`, with no filter selection to measure against, falls back to the highest-cardinality `number`/`date` field. That spreads blocks evenly but is blind to what you query, so a bulk-maintenance timestamp can win — check it, or use the wizard.
 
+### Which fields `init` indexes
+
+`init` recommends a small default set of indexed fields: list fields (which must be indexed), plus up to three facet-like fields ranked by how many distinct values they have. Since every field is filterable anyway (as a rider, next to a filter that prunes), an index is only worth building if it narrows which files a query reads. So `init` also checks each candidate. It sorts a sample of 5,000 records by the recommended sort field and estimates how many data files the field's average value would sit in. A field above 35% (the same line where `build` warns "this index barely prunes") is passed over, its slot goes to the next candidate, and `init` prints why:
+
+```
+blockdb: init left "color" unindexed — sorted by "id", its average value would sit in about 100% of the data files, ...
+```
+
+Add `"indexed": true` (or `--indexed`) if an app filters on that field **by itself**: a `where` made only of riders is rejected, and an index counts as a pruning constraint even when it prunes badly. The wizard's "Fast filters" step marks the same fields "barely prunes" as you pick. With fewer than 8 data files there's nothing to judge, and cardinality alone decides.
+
 ### Text-search opt-ins have real cost
 
 `equals`, `in` and `startsWith` are free on any indexed string field. `endsWith` (reversed index) and `contains` (trigram index) are per-field opt-ins that each build an extra structure, and `build` warns in two distinct ways:

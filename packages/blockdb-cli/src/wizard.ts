@@ -16,7 +16,15 @@ import { compareSortValues, type SortKind } from "./sort.js";
 import { valuesOf } from "./secondary-index.js";
 import type { PopulationStats } from "./input.js";
 import type { OnProgress } from "./progress.js";
-import { lowCardinalitySortFieldWarning, oversizedRecordWarning, unsuitableTextIndexWarning } from "./warnings.js";
+import { BlockShareEstimator } from "./prune-estimate.js";
+import {
+  lowCardinalitySortFieldWarning,
+  MIN_BLOCKS_FOR_SELECTIVITY,
+  oversizedRecordWarning,
+  UNSELECTIVE_POSTINGS_RATIO,
+  unselectiveIndexWarning,
+  unsuitableTextIndexWarning,
+} from "./warnings.js";
 import type { FieldConfig, FieldKind } from "./types.js";
 
 /**
@@ -326,13 +334,18 @@ const localityCache = new Map<string, Record<string, SortFieldLocality>>();
 const localityCacheKeys = new WeakMap<Record<string, unknown>[], number>();
 let nextRecordsId = 0;
 
-function localityCacheKey(data: WizardData, state: WizardState, bins: number): string {
+/** A stable id for a sample, so caches can key on it without hashing the records. */
+function recordsId(data: WizardData): number {
   let id = localityCacheKeys.get(data.records);
   if (id === undefined) {
     id = nextRecordsId++;
     localityCacheKeys.set(data.records, id);
   }
-  return `${id}|${bins}|${[...state.indexedFields].sort().join(",")}`;
+  return id;
+}
+
+function localityCacheKey(data: WizardData, state: WizardState, bins: number): string {
+  return `${recordsId(data)}|${bins}|${[...state.indexedFields].sort().join(",")}`;
 }
 
 export function sortFieldLocality(
@@ -607,6 +620,12 @@ export interface WizardEstimate {
   /** Per sort-field candidate, the measured cost of the user's filters under that choice. */
   locality: Record<string, SortFieldLocality>;
   masterProfile: DatasetProfile;
+  /**
+   * Per filterable field, the estimated share of data files its average value sits in under the
+   * current sort field — the build's "barely prunes" number, predicted from the sample (#31). Empty
+   * below the block count where that ratio means anything.
+   */
+  blockShare: Record<string, number>;
   /** What enabling `endsWith`/`contains` on a field WOULD cost, independent of whether it's toggled on yet — the text-search step's live preview (ADR-0006 §2/§3). */
   probeIndex(name: string, opts: { endsWith?: boolean; contains?: boolean }): IndexSizeEstimate;
 }
@@ -645,6 +664,27 @@ export function estimateForState(data: WizardData, state: WizardState): WizardEs
   const computed = computeEstimateForState(data, state);
   estimateCache.set(cacheKey, computed);
   return computed;
+}
+
+/** Memoizes `blockSharesFor`, which depends only on the sample, the sort field and the block count. */
+const blockShareCache = new Map<string, Record<string, number>>();
+
+function blockSharesFor(data: WizardData, sortField: string, blockCount: number): Record<string, number> {
+  if (blockCount < MIN_BLOCKS_FOR_SELECTIVITY) return {};
+  const cacheKey = `${recordsId(data)}|${sortField}|${blockCount}`;
+  const cached = blockShareCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const sortKind = data.fields.find((f) => f.name === sortField)?.kind as SortKind;
+  const estimator = new BlockShareEstimator(data.records, sortField, sortKind, data.recordCount, blockCount);
+  const out: Record<string, number> = {};
+  for (const f of data.fields) {
+    if (f.name === sortField || f.kind === "json") continue;
+    const share = estimator.meanShare(f.name, f.multi, f.cardinality);
+    if (share !== undefined) out[f.name] = share;
+  }
+  blockShareCache.set(cacheKey, out);
+  return out;
 }
 
 function computeEstimateForState(data: WizardData, state: WizardState): WizardEstimate {
@@ -701,6 +741,13 @@ function computeEstimateForState(data: WizardData, state: WizardState): WizardEs
           : `Some fields cannot be helped by any sort field — only one dimension can be clustered.`),
     );
   }
+  // The build's "barely prunes" warning, predicted, so a useless index is visible before it's built.
+  const blockShare = blockSharesFor(data, state.sortField, costs.blockCount);
+  for (const f of data.fields) {
+    if (!state.indexedFields.has(f.name) || f.multi || blockShare[f.name] === undefined) continue;
+    const unselective = unselectiveIndexWarning(f.name, blockShare[f.name]! * costs.blockCount, costs.blockCount);
+    if (unselective) warnings.push(unselective);
+  }
   // Structural, so it lands the moment the box is ticked rather than after a build.
   const byField = new Map(data.fields.map((f) => [f.name, f]));
   for (const [operator, selected] of [
@@ -726,7 +773,7 @@ function computeEstimateForState(data: WizardData, state: WizardState): WizardEs
     return estimateIndexSize(profile, costs.blockCount, { indexChunkBytes: DEFAULT_INDEX_CHUNK_BYTES, ...opts });
   }
 
-  return { costs, warnings, locality, masterProfile, probeIndex };
+  return { costs, warnings, locality, masterProfile, blockShare, probeIndex };
 }
 
 // ---------------------------------------------------------------------------
@@ -969,7 +1016,13 @@ function renderFilterFields(data: WizardData, state: WizardState, estimate: Wiza
     const box = on ? color(ANSI.green, "[x]") : dim("[ ]");
     const idxEstimate = estimate.costs.indexes[f.name];
     const cost = on && idxEstimate ? dim(`index loads on use: ${fmtBytes(idxEstimate.baseBytes)}`) : dim("not indexed");
-    const plain = `  ${box} ${pad(f.name, 22)} ${cost}`;
+    // A list field can't go unindexed, so there's no choice to inform.
+    const share = f.multi ? undefined : estimate.blockShare[f.name];
+    const prunes =
+      share !== undefined && share > UNSELECTIVE_POSTINGS_RATIO
+        ? "  " + color(ANSI.yellow, `barely prunes: in ~${Math.round(share * 100)}% of files`)
+        : "";
+    const plain = `  ${box} ${pad(f.name, 22)} ${cost}${prunes}`;
     return renderRow(plain, { cursor: idx === state.cursor });
   });
 

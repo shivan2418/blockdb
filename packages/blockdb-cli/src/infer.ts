@@ -1,6 +1,7 @@
 import { SORTABLE_KINDS, type SortableKind } from "./config.js";
 import type { OnProgress } from "./progress.js";
 import type { FieldKind } from "./types.js";
+import { UNSELECTIVE_POSTINGS_RATIO } from "./warnings.js";
 
 /** ISO-8601 date/date-time, e.g. "1999-03-31" or "2000-05-05T00:00:00Z" (ADR-0001: date = string + isDate). */
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/;
@@ -238,6 +239,24 @@ export interface InferenceResult {
   pk?: string;
   /** Recommended default opt-in indexed set (excludes the sort field). */
   indexedFields: string[];
+  /**
+   * Fields the ranking would have indexed but left out because the index wouldn't prune (#31). Each
+   * one's slot went to the next candidate. Empty when inference had no `blockShare` probe.
+   */
+  unselectiveIndexes: UnselectiveIndex[];
+}
+
+/**
+ * Estimated share of data files the average value of `field` would sit in with records sorted by
+ * `sortField`: the build's "barely prunes" measurement (ADR-0013), predicted before a build exists.
+ * Undefined when there is nothing to judge, such as too few blocks for the ratio to mean anything.
+ */
+export type BlockShareProbe = (sortField: string, sortKind: SortableKind, field: string, inferred: InferredField) => number | undefined;
+
+export interface UnselectiveIndex {
+  field: string;
+  /** Estimated share of data files the field's average value sits in, from 0 to 1. */
+  blockShare: number;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -442,7 +461,12 @@ function recommendPk(fields: Record<string, InferredField>): string | undefined 
   return idLike[0]?.[0];
 }
 
-function recommendIndexedFields(fields: Record<string, InferredField>, recordCount: number, sortField: string): string[] {
+function recommendIndexedFields(
+  fields: Record<string, InferredField>,
+  recordCount: number,
+  sortField: string,
+  blockShare: BlockShareProbe | undefined,
+): Pick<InferenceResult, "indexedFields" | "unselectiveIndexes"> {
   const entries = Object.entries(fields).filter(([name]) => name !== sortField);
 
   // Multi-valued fields can only be declared correctly when indexed (T7 constraint) — always include them.
@@ -466,11 +490,22 @@ function recommendIndexedFields(fields: Record<string, InferredField>, recordCou
       ([, f]) =>
         f.kind !== "json" && !f.multi && f.cardinality > 1 && f.cardinality <= maxFacetCardinality,
     )
-    .sort(([nameA, a], [nameB, b]) => (a.cardinality !== b.cardinality ? b.cardinality - a.cardinality : nameA < nameB ? -1 : 1))
-    .slice(0, DEFAULT_MAX_INDEXED)
-    .map(([name]) => name);
+    .sort(([nameA, a], [nameB, b]) => (a.cardinality !== b.cardinality ? b.cardinality - a.cardinality : nameA < nameB ? -1 : 1));
 
-  return [...forced, ...categorical];
+  // Cardinality says how finely a field groups records, not whether those groups line up with blocks.
+  // Since ADR-0013 an unindexed field is still filterable as a rider, so an index whose values sit in
+  // most blocks is pure cost — the build warns about exactly these. Skip them and give the slot to the
+  // next candidate (#31). Multi-valued fields stay forced: they can't be declared unindexed.
+  const picked: string[] = [];
+  const unselectiveIndexes: UnselectiveIndex[] = [];
+  for (const [name, f] of categorical) {
+    if (picked.length === DEFAULT_MAX_INDEXED) break;
+    const share = blockShare?.(sortField, fields[sortField]!.kind as SortableKind, name, f);
+    if (share !== undefined && share > UNSELECTIVE_POSTINGS_RATIO) unselectiveIndexes.push({ field: name, blockShare: share });
+    else picked.push(name);
+  }
+
+  return { indexedFields: [...forced, ...picked], unselectiveIndexes };
 }
 
 /**
@@ -509,7 +544,8 @@ export class SchemaInferrer {
     return this.recordCount;
   }
 
-  finish(): InferenceResult {
+  /** `blockShare` lets the index recommendation skip fields that wouldn't prune; without it, cardinality alone decides. */
+  finish(opts: { blockShare?: BlockShareProbe } = {}): InferenceResult {
     const recordCount = this.recordCount;
     const fields: Record<string, InferredField> = {};
     // Fields in order of first appearance, like the records' own keys.
@@ -517,9 +553,9 @@ export class SchemaInferrer {
 
     const sortField = recommendSortField(fields, recordCount);
     const pk = recommendPk(fields);
-    const indexedFields = recommendIndexedFields(fields, recordCount, sortField);
+    const { indexedFields, unselectiveIndexes } = recommendIndexedFields(fields, recordCount, sortField, opts.blockShare);
 
-    return { recordCount, fields, sortField, pk, indexedFields };
+    return { recordCount, fields, sortField, pk, indexedFields, unselectiveIndexes };
   }
 }
 

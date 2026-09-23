@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { loadConfigFile, resolveConfig } from "./config.js";
-import { SchemaInferrer, type InferenceResult, type ValueShape } from "./infer.js";
+import { DEFAULT_BLOCK_BYTES, loadConfigFile, resolveConfig } from "./config.js";
+import { estimateBlockCount } from "./estimator.js";
+import { SchemaInferrer, type BlockShareProbe, type InferenceResult, type UnselectiveIndex, type ValueShape } from "./infer.js";
+import { BlockShareEstimator } from "./prune-estimate.js";
 import { Reservoir } from "./reservoir.js";
 import { iterateInputRecords, type InputReadOptions, type PopulationStats } from "./input.js";
 import type { OnProgress } from "./progress.js";
-import { unsuitableTextIndexWarning } from "./warnings.js";
+import { MIN_BLOCKS_FOR_SELECTIVITY, skippedIndexNote, unsuitableTextIndexWarning } from "./warnings.js";
 import type { FieldConfig, InputFormat, BlockDbConfig } from "./types.js";
 import { getFormatVersion } from "./version.js";
 
@@ -34,29 +36,100 @@ export interface InputScan {
 }
 
 /**
+ * Records kept for judging whether a recommended index would prune (#31). On Scryfall the estimate
+ * lands within ~2 percentage points of the built indexes from 2,000 records and barely improves past
+ * 10,000; this is the middle, since wide records make each sampled one cost kilobytes.
+ */
+const PRUNE_SAMPLE_SIZE = 5_000;
+
+/** A sampled record reduced to what the pruning estimate reads, plus its size for the block count. */
+interface PruneSampleItem {
+  record: Record<string, unknown>;
+  bytes: number;
+}
+
+/**
+ * The part of a record a pruning estimate can use: scalars and arrays of scalars, the only values an
+ * index is built on. Nested objects are dropped, so the sample stays small on wide records.
+ */
+function indexableProjection(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key in record) {
+    const value = record[key];
+    if (value !== null && typeof value === "object") {
+      if (!Array.isArray(value) || value.some((v) => v !== null && typeof v === "object")) continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * The inference probe that predicts each candidate index's "barely prunes" number from the sample,
+ * so the recommendation can pass over indexes the build would warn about (#31). `blockCount` comes
+ * from the measured dataset size when there is one, else from the sample's mean record size.
+ */
+function blockShareProbe(
+  sample: PruneSampleItem[],
+  recordCount: number,
+  datasetBytes: number | undefined,
+  blockBytes: number,
+): BlockShareProbe | undefined {
+  if (sample.length === 0) return undefined;
+  const meanBytes = sample.reduce((sum, item) => sum + item.bytes, 0) / sample.length;
+  const blockCount = estimateBlockCount(datasetBytes ?? meanBytes * recordCount, blockBytes);
+  // Same floor as the build warning: on a handful of blocks every value is "in most of them".
+  if (blockCount < MIN_BLOCKS_FOR_SELECTIVITY) return undefined;
+
+  const records = sample.map((item) => item.record);
+  const estimators = new Map<string, BlockShareEstimator>();
+  return (sortField, sortKind, field, inferred) => {
+    let estimator = estimators.get(sortField);
+    if (estimator === undefined) {
+      estimator = new BlockShareEstimator(records, sortField, sortKind, recordCount, blockCount);
+      estimators.set(sortField, estimator);
+    }
+    return estimator.meanShare(field, inferred.multi, inferred.cardinality);
+  };
+}
+
+/**
  * One streaming pass over the input for `init` and the wizard: infers the schema, draws the estimate
- * sample and measures the dataset without ever holding more than one record plus the sample (#29).
+ * sample and measures the dataset without ever holding more than one record plus the samples (#29).
  * Shared so the two paths can't read the input differently and drift apart in what they recommend.
+ * `blockBytes` is the target block size the recommendation judges index pruning against.
  */
 export function scanInput(
   inputPath: string,
   readOpts: InputReadOptions,
-  opts: { estimateSample?: number; measureBytes?: boolean } = {},
+  opts: { estimateSample?: number; measureBytes?: boolean; blockBytes?: number } = {},
 ): InputScan {
   const inferrer = new SchemaInferrer();
   const reservoir = new Reservoir<Record<string, unknown>>(opts.estimateSample ?? 0);
+  const pruneSample = new Reservoir<PruneSampleItem>(PRUNE_SAMPLE_SIZE);
   let datasetBytes = 0;
 
   for (const record of iterateInputRecords(inputPath, readOpts)) {
     inferrer.add(record);
     reservoir.add(record);
+    pruneSample.addWith(() => ({ record: indexableProjection(record), bytes: Buffer.byteLength(JSON.stringify(record), "utf8") }));
     if (opts.measureBytes) datasetBytes += Buffer.byteLength(JSON.stringify(record), "utf8");
   }
 
   if (inferrer.size === 0) {
     throw new Error(`blockdb: init found no records in "${inputPath}" to infer a schema from`);
   }
-  return { inferred: inferrer.finish(), sample: reservoir.sample, population: { recordCount: inferrer.size, datasetBytes } };
+  const blockShare = blockShareProbe(
+    pruneSample.sample,
+    inferrer.size,
+    opts.measureBytes ? datasetBytes : undefined,
+    opts.blockBytes ?? DEFAULT_BLOCK_BYTES,
+  );
+  return {
+    inferred: inferrer.finish(blockShare ? { blockShare } : {}),
+    sample: reservoir.sample,
+    population: { recordCount: inferrer.size, datasetBytes },
+  };
 }
 
 /** Convention for editor JSON-schema resolution: `config.schema.json` ships inside the installed devDependency. */
@@ -275,20 +348,28 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
   let pk: string | undefined;
   /** Per-field value shapes, only available on a run that actually read records (see the warning below). */
   let inferredShapes: Record<string, ValueShape> | undefined;
+  /** Fields the recommendation passed over because their index wouldn't prune (#31). */
+  let unselectiveIndexes: UnselectiveIndex[] = [];
 
   if (reinferred) {
     const readDelimiter = delimiter ?? (format === "tsv" ? "\t" : ",");
     // Streams: inference holds counts per field, never the records, so reading everything is safe on
     // any size of input (#29).
-    const { inferred } = scanInput(path.resolve(opts.cwd, inputPath), {
-      format,
-      delimiter: readDelimiter,
-      recordsPath,
-      fields: {},
-      // Reads everything unless the caller opted into a sample (see `sampleLimit`).
-      limit: sampleLimit(opts),
-      ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
-    });
+    const blockBytes = opts.blockBytes ?? existing?.blockBytes;
+    const { inferred } = scanInput(
+      path.resolve(opts.cwd, inputPath),
+      {
+        format,
+        delimiter: readDelimiter,
+        recordsPath,
+        fields: {},
+        // Reads everything unless the caller opted into a sample (see `sampleLimit`).
+        limit: sampleLimit(opts),
+        ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+      },
+      blockBytes !== undefined ? { blockBytes } : {},
+    );
+    unselectiveIndexes = inferred.unselectiveIndexes;
 
     // `--reinfer` refreshes what init LEARNED from the data (kinds, absent/nullable, lists, value
     // sets) and keeps what the user CHOSE: the sort field, the pk, which fields are indexed and
@@ -404,11 +485,22 @@ export function resolveInitConfig(opts: InitOptions): InitResult {
     }
   }
 
+  // Only the fields that are still unindexed after flags and kept choices: `--indexed` or an existing
+  // config that indexes the field overrules the recommendation, and then there is nothing to explain.
+  const skippedIndexNotes = unselectiveIndexes
+    .filter(({ field }) => config.schema.fields[field] !== undefined && config.schema.fields[field]!.indexed !== true)
+    .map(({ field, blockShare }) => skippedIndexNote(field, sortField, blockShare));
+
   return {
     configPath: opts.configPath,
     config,
     reinferred,
-    warnings: [...repaired.warnings, ...shapeWarnings, ...duplicateValueUnionHints(config.schema.fields)],
+    warnings: [
+      ...repaired.warnings,
+      ...shapeWarnings,
+      ...skippedIndexNotes,
+      ...duplicateValueUnionHints(config.schema.fields),
+    ],
   };
 }
 
