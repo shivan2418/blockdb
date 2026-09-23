@@ -1,5 +1,18 @@
 # blockdb-cli
 
+## 0.5.0
+
+### Minor Changes
+
+- 080b26f: `--ends-with` and `--contains` are now the complete set when passed, like `--indexed`, so a text opt-in can be turned off from the CLI and the wizard (unticking `contains` in the wizard used to keep it on a re-run). Un-indexing a field with `--indexed` also drops its `endsWith`/`contains` instead of failing with "opts into contains but is not indexed".
+- 0504680: A field's `values` union no longer requires `indexed: true`: every field is queryable since ADR-0013, and the union narrows an unindexed field's filters too. Following the build's "this index barely prunes, consider removing indexed" advice no longer breaks the next build, and the advice names any `endsWith`/`contains` that go with the index. `init --reinfer` and `--indexed` keep an existing union when a field is un-indexed.
+
+### Patch Changes
+
+- 6a0e1d5: A CSV/TSV number cell of `Infinity`, `-Infinity` or `1e999` now fails the read ("isn't a finite number") instead of being written to the block as `null`, where the manifest depended on whether the sort had spilled to disk. Schema drift also rejects a non-finite number.
+- 455d6ec: `init`'s check for indexes that wouldn't prune is now judged against the sort field the config will actually use (`--sort-field`, or the one an existing config keeps on `--reinfer`), not the inferred one, and against the whole input's size when `--sample`/`--sample-size` reads only part of it. The "left X unindexed" note no longer appears for a field the existing config already had, or when `--indexed` gives the complete set.
+- e440b32: The wizard's default indexes and its live "barely prunes" marks now come from the same sample, block size and whole-input size as `init`'s recommendation, so it no longer pre-ticks a field and then flags it. With `--sample-size` the wizard judges pruning against the whole input.
+
 ## 0.4.0
 
 ## 0.3.1

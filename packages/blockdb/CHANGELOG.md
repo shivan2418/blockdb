@@ -1,5 +1,13 @@
 # blockdb
 
+## 0.5.0
+
+### Patch Changes
+
+- 98e5347: A first manifest fetch that fails (a 503 on page load, a dropped connection) is no longer cached: the next query fetches the manifest again instead of failing until the page reloads.
+- ea2c7e5: A host with a single-page-app fallback (200 and `index.html` for a missing file) now gets the same stale-manifest recovery as a 404: an HTML response for a data file is `DEPLOY_INTEGRITY`, and for `manifest.json` it is `CONFIG`, instead of `CORRUPT_DATA`.
+- 441bff2: The rider check now looks at values as well as operators. An empty `startsWith`/`endsWith`, an empty `hasEvery` and `isEmpty: false` match every block, so a `where` that relies on them alone now throws `NEEDS_PRUNING` (and `wherePrunes` returns `false`) instead of quietly downloading the whole dataset. A filter or operator set to `undefined` is left out, and no longer crashes `findMany`/`count` with a `TypeError`.
+
 ## 0.4.0
 
 ### Minor Changes

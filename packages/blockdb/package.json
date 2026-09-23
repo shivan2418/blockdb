@@ -1,6 +1,6 @@
 {
   "name": "blockdb",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Query large static datasets from any static host — partitioned into many small files, typed client, no WASM, no HTTP Range.",
   "type": "module",
   "license": "MIT",
