@@ -84,7 +84,7 @@ type AllStringOps<V extends string = string> = {
   not: V; // always a rider
   in: V[];
   startsWith: string;
-  contains: string; // prunes with a trigram index, else a rider
+  contains: string; // prunes with a trigram index and 3+ characters, else a rider
   endsWith: string; // prunes with a reversed index, else a rider
   // Lexicographic ranges: only a string SORT field is ever granted these (ADR-0003 §7), so PickOps
   // keeps them off secondary string fields, whose operator lists never include them.
@@ -247,20 +247,24 @@ function filterOpPrunes(op: string, value: unknown, pruning: readonly string[]):
   return !(op === "contains" && typeof value === "string" && value.length < 3);
 }
 
-/**
- * The rider rule at runtime (ADR-0013), for untyped JS callers and `where` objects built dynamically
- * (e.g. from UI input) that the compiler never sees. Throws `NEEDS_PRUNING` naming the fields that
- * could prune on this dataset.
- */
-export function assertWhereHasPruning(
-  where: Record<string, Record<string, unknown>> | undefined,
-  schema: { sortField: string; fields: Record<string, { operators: readonly string[]; pruning?: readonly string[]; multi?: true | boolean }> },
-): void {
-  if (!where) return;
-  const entries = Object.entries(where).filter(([, filter]) => filter !== undefined);
-  if (entries.length === 0) return;
+/** The fields a pruning check reads: each field's operators and, when codegen emitted it, its `pruning` list. */
+type PruningSchema = { fields: Record<string, { operators: readonly string[]; pruning?: readonly string[]; multi?: true | boolean }> };
 
-  const prunes = entries.some(([field, filter]) => {
+/**
+ * Whether `where` has at least one filter that narrows which blocks are read, which is the rule
+ * `findMany` enforces with `NEEDS_PRUNING` (ADR-0013). For a `where` built from UI input: check it,
+ * and fall back (add a sort-field range, say) instead of catching the error. Pass the collection's
+ * `getSchema()`. An empty or missing `where` counts as pruning, since it is allowed.
+ *
+ * The one rule the types can't see: `contains` prunes only with 3 or more characters. A shorter
+ * needle has no trigram to look up, so it rides even on a field opted into `contains`.
+ */
+export function wherePrunes(where: Record<string, Record<string, unknown> | undefined> | undefined, schema: PruningSchema): boolean {
+  if (!where) return true;
+  const entries = Object.entries(where).filter(([, filter]) => filter !== undefined);
+  if (entries.length === 0) return true;
+
+  return entries.some(([field, filter]) => {
     const meta = schema.fields[field];
     if (!meta) return false;
     const pruning = pruningOpsOf(meta);
@@ -273,7 +277,29 @@ export function assertWhereHasPruning(
       return filterOpPrunes(op, value, pruning);
     });
   });
-  if (prunes) return;
+}
+
+/** Whether any filter in `where` (or a list field's element filter) is a `contains` too short to prune. */
+function hasShortContains(where: Record<string, Record<string, unknown> | undefined>): boolean {
+  const short = (filter: unknown): boolean =>
+    typeof filter === "object" &&
+    filter !== null &&
+    Object.entries(filter).some(
+      ([op, value]) => (op === "contains" && typeof value === "string" && value.length < 3) || ((op === "some" || op === "every") && short(value)),
+    );
+  return Object.values(where).some(short);
+}
+
+/**
+ * The rider rule at runtime (ADR-0013), for untyped JS callers and `where` objects built dynamically
+ * (e.g. from UI input) that the compiler never sees. Throws `NEEDS_PRUNING` naming the fields that
+ * could prune on this dataset. `wherePrunes` is the non-throwing check.
+ */
+export function assertWhereHasPruning(
+  where: Record<string, Record<string, unknown>> | undefined,
+  schema: PruningSchema & { sortField: string },
+): void {
+  if (wherePrunes(where, schema)) return;
 
   const prunable = Object.entries(schema.fields)
     .filter(([name, meta]) => name !== schema.sortField && pruningOpsOf(meta).length > 0)
@@ -284,7 +310,11 @@ export function assertWhereHasPruning(
       `blockdb: every filter in this where is a rider (it tests fetched records but can't narrow which blocks are read), ` +
       `so the query would read the whole dataset. Add a filter on the sort field "${schema.sortField}"` +
       (prunable.length > 0 ? ` or on an indexed field (${prunable.join(", ")})` : "") +
-      `. See "Riders" in docs/query-guide.md.`,
+      `.` +
+      (hasShortContains(where!)
+        ? ` A \`contains\` needs at least 3 characters to use its trigram index; a shorter one is a rider.`
+        : "") +
+      ` Check with wherePrunes() before querying. See "Riders" in docs/query-guide.md.`,
   });
 }
 

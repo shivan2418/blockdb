@@ -4,6 +4,7 @@ export { normalize, type NormalizerName } from "./normalize.js";
 export type { Manifest, BlockDescriptor, SchemaDescriptor, FieldSchemaEntry } from "./manifest.js";
 export {
   assertWhereHasPruning,
+  wherePrunes,
   type ClientOptions,
   type Collection,
   type CollectionMeta,

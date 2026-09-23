@@ -128,6 +128,18 @@ await db.books.findMany({ where: { inStock: { equals: true } } }); // ✗ only a
 await db.books.count({ inStock: { equals: true } });               // ✓ an upper bound, no download
 ```
 
+**Checking a `where` built from UI input.** The compiler can't see one rule: `contains` prunes only with **3 or more characters**, because a shorter needle has no trigram to look up. So `{ title_fold: { contains: "ab" } }` type-checks, then throws `NEEDS_PRUNING` at runtime if nothing else in the `where` prunes. To fall back instead of catching the error, ask `wherePrunes` first. It applies exactly the rule `findMany` enforces:
+
+```ts
+import { normalize, wherePrunes } from "blockdb";
+
+const where = { title_fold: { contains: normalize("fold", userInput) ?? "" } };
+const { records } = wherePrunes(where, db.books.getSchema())
+  ? await db.books.findMany({ where, limit: 20 })
+  : // too short for the trigram index: narrow by the sort field as well
+    await db.books.findMany({ where: { ...where, title: { startsWith: userInput } }, limit: 20 });
+```
+
 **When to index a field.** Index it when a filter on it should narrow the read by itself. Leave it unindexed when it's only ever combined with a more selective filter, or when its values are spread across every file anyway: a boolean, or a house number in an address list sorted by street. `blockdb build` warns about an index whose average value appears in most files, because that index costs build output and saves nothing.
 
 ## Which operators a field gets
@@ -136,7 +148,7 @@ await db.books.count({ inStock: { equals: true } });               // ✓ an upp
 |---|---|---|
 | Sort field, number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` | all but `not` |
 | Sort field, string | the same, plus `startsWith` `endsWith` `contains` | all but `not` `endsWith` `contains` |
-| String | `equals` `in` `startsWith` `endsWith` `contains` `not` | if indexed: `equals` `in` `startsWith`, plus `endsWith` / `contains` if opted in |
+| String | `equals` `in` `startsWith` `endsWith` `contains` `not` | if indexed: `equals` `in` `startsWith`, plus `endsWith` / `contains` if opted in (`contains` with 3+ characters) |
 | Number or date | `equals` `in` `gt` `gte` `lt` `lte` `not` | if indexed: all but `not` |
 | Boolean | `equals` `not` | if indexed: `equals` |
 | List (`"multi": true`, always indexed) | `some` `every` `hasEvery` `isEmpty` | all |
