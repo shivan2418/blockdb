@@ -582,7 +582,16 @@ export function createClient<S extends SchemaMeta, Records>(
   const maxResults = opts.maxResults ?? DEFAULT_MAX_RESULTS;
   const manifestCompression = opts.manifestCompression ?? (opts.manifestGzip === true ? "gzip" : "none");
   let manifestPromise: Promise<Manifest> | undefined;
-  const getManifest = (): Promise<Manifest> => (manifestPromise ??= fetchManifest(basePath, fetchImpl, manifestCompression));
+  // A failed first fetch (a 503 on page load, a dropped connection) isn't remembered either: the next
+  // query tries again rather than inheriting the rejection until reload.
+  const getManifest = (): Promise<Manifest> => {
+    if (manifestPromise) return manifestPromise;
+    const promise = fetchManifest(basePath, fetchImpl, manifestCompression).catch((error: unknown) => {
+      if (manifestPromise === promise) manifestPromise = undefined;
+      throw error;
+    });
+    return (manifestPromise = promise);
+  };
 
   // The one in-flight (or finished) refetch, keyed by the manifest it replaces. Every query that
   // failed against that same stale manifest shares it, so a burst of concurrent queries after a

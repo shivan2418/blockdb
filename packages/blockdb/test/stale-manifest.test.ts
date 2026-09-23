@@ -176,6 +176,26 @@ describe("stale cached manifest after a redeploy (#32)", () => {
     await caught(client.movies.findMany({ where: { title: { equals: "Gladiator" } } }));
     expect(manifestRequests(seen).map((s) => s.cache)).toEqual(["reload"]);
   });
+
+  test("a first manifest fetch that fails isn't cached: the next query fetches it again", async () => {
+    let failNext = true;
+    const inner = hostFetch([], newDeploy);
+    let manifestFetches = 0;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("manifest.json")) {
+        manifestFetches++;
+        if (failNext) {
+          failNext = false;
+          return { ok: false, status: 503, json: async () => ({}), text: async () => "" } as Response;
+        }
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+    const client = createClient<typeof schema, Records>(schema, { basePath: "/data", fetch: fetchImpl });
+    expect((await caught(client.movies.count())).code).toBe("NETWORK");
+    expect(await client.movies.count()).toEqual({ count: 2, exact: true });
+    expect(manifestFetches).toBe(2);
+  });
 });
 
 describe("manifestReferences", () => {
